@@ -1,0 +1,367 @@
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "formats/animation.h"
+#include "formats/bk.h"
+#include "formats/bkanim.h"
+#include "formats/error.h"
+#include "formats/internal/reader.h"
+#include "formats/internal/writer.h"
+#include "formats/palette.h"
+#include "formats/pcx.h"
+#include "formats/vga_image.h"
+#include "utils/allocator.h"
+
+void sd_bk_create(sd_bk_file *bk) {
+    assert(bk != NULL);
+
+    // Clear everything
+    memset(bk, 0, sizeof(sd_bk_file));
+    array_create_with_size_cb(&bk->anims, MAX_BK_ANIMS, sd_bk_anim_free_cb);
+}
+
+void sd_bk_copy(sd_bk_file *dst, const sd_bk_file *src) {
+    assert(dst != NULL);
+    assert(src != NULL);
+
+    // Clear everything
+    memset(dst, 0, sizeof(sd_bk_file));
+
+    // Int stuff
+    dst->file_id = src->file_id;
+    dst->unknown_a = src->unknown_a;
+    dst->palette_count = src->palette_count;
+
+    // Copy sounds
+    memcpy(dst->soundtable, src->soundtable, sizeof(src->soundtable));
+
+    // Copy animations
+    array_create_with_size_cb(&dst->anims, MAX_BK_ANIMS, sd_bk_anim_free_cb);
+    for(int i = 0; i < MAX_BK_ANIMS; i++) {
+        const sd_bk_anim *src_anim = array_get(&src->anims, i);
+        if(src_anim != NULL) {
+            sd_bk_anim *copy = omf_calloc(1, sizeof(sd_bk_anim));
+            array_set(&dst->anims, i, copy);
+            sd_bk_anim_copy(copy, src_anim);
+        }
+    }
+
+    // Copy background
+    if(src->background != NULL) {
+        dst->background = omf_calloc(1, sizeof(sd_vga_image));
+        sd_vga_image_copy(dst->background, src->background);
+    }
+
+    // Copy palettes
+    for(int i = 0; i < MAX_BK_PALETTES; i++) {
+        dst->palettes[i] = NULL;
+        if(src->palettes[i] != NULL) {
+            dst->palettes[i] = omf_calloc(1, sizeof(vga_palette));
+            dst->remaps[i] = omf_calloc(1, sizeof(vga_remap_tables));
+            memcpy(dst->palettes[i], src->palettes[i], sizeof(vga_palette));
+            memcpy(dst->remaps[i], src->remaps[i], sizeof(vga_remap_tables));
+        }
+    }
+}
+
+void sd_bk_postprocess(sd_bk_file *bk) {
+    char *table[1000] = {0}; // temporary lookup table
+    // fix NULL pointers for any 'missing' sprites
+    iterator it;
+    sd_bk_anim *bka;
+    array_iter_begin(&bk->anims, &it);
+    foreach(it, bka) {
+        sd_animation *anim = bka->animation;
+        int sprite_count = sd_animation_get_sprite_count(anim);
+        for(int j = 0; j < sprite_count; j++) {
+            sd_sprite *sprite = sd_animation_get_sprite(anim, j);
+            if(sprite->missing > 0) {
+                if(table[sprite->index]) {
+                    sprite->data = table[sprite->index];
+                }
+            } else {
+                table[sprite->index] = sprite->data;
+            }
+        }
+    }
+}
+
+int sd_bk_load(sd_bk_file *bk, const path *filename) {
+    int ret = SD_SUCCESS;
+
+    str ext;
+    path_ext(filename, &ext);
+    if(str_equal_c(&ext, ".PCX")) {
+        str_free(&ext);
+        return sd_bk_load_from_pcx(bk, filename);
+    }
+    str_free(&ext);
+
+    // Initialize reader
+    sd_reader *r = sd_reader_open(filename);
+    if(!r) {
+        return SD_FILE_OPEN_ERROR;
+    }
+
+    // Header
+    bk->file_id = sd_read_udword(r);
+    bk->unknown_a = sd_read_ubyte(r);
+    const uint16_t img_w = sd_read_uword(r);
+    const uint16_t img_h = sd_read_uword(r);
+
+    // Read animations
+    while(1) {
+        sd_skip(r, 4); // offset of next animation
+        const uint8_t anim_no = sd_read_ubyte(r);
+        if(anim_no >= MAX_BK_ANIMS || !sd_reader_ok(r)) {
+            break;
+        }
+
+        // Initialize animation
+        sd_bk_anim *bka = omf_calloc(1, sizeof(sd_bk_anim));
+        array_set(&bk->anims, anim_no, bka);
+        sd_bk_anim_create(bka);
+        if((ret = sd_bk_anim_load(r, bka)) != SD_SUCCESS) {
+            goto exit_0;
+        }
+    }
+
+    // Read background image
+    bk->background = omf_calloc(1, sizeof(sd_vga_image));
+    if((ret = sd_vga_image_create(bk->background, img_w, img_h)) != SD_SUCCESS) {
+        goto exit_0;
+    }
+    int bsize = img_w * img_h;
+    sd_read_buf(r, bk->background->data, bsize);
+
+    // Read palettes and their remaps
+    bk->palette_count = sd_read_ubyte(r);
+    for(uint8_t i = 0; i < bk->palette_count; i++) {
+        bk->palettes[i] = omf_malloc(sizeof(vga_palette));
+        if((ret = palette_load(r, bk->palettes[i])) != SD_SUCCESS) {
+            goto exit_0;
+        }
+        bk->remaps[i] = omf_malloc(sizeof(vga_remap_tables));
+        if((ret = palette_remaps_load(r, bk->remaps[i])) != SD_SUCCESS) {
+            goto exit_0;
+        }
+    }
+
+    // Read soundtable
+    sd_read_buf(r, bk->soundtable, 30);
+
+    // Fix missing sprites
+    sd_bk_postprocess(bk);
+
+exit_0:
+    sd_reader_close(r);
+    return ret;
+}
+
+int sd_bk_load_from_pcx(sd_bk_file *bk, const path *filename) {
+    int ret;
+    pcx_file *pcx = omf_calloc(1, sizeof(pcx_file));
+    if((ret = pcx_load(pcx, filename)) != SD_SUCCESS) {
+        return ret;
+    }
+    bk->file_id = 0;
+    bk->palette_count = 1;
+    bk->background = omf_calloc(1, sizeof(sd_vga_image));
+    sd_vga_image_copy(bk->background, &pcx->image);
+    bk->palettes[0] = omf_malloc(sizeof(vga_palette));
+    bk->remaps[0] = omf_malloc(sizeof(vga_remap_tables));
+    palette_copy(bk->palettes[0], &pcx->palette, 0, 256);
+    vga_remaps_init(bk->remaps[0]); // Not used, but expected to be allocated.
+    pcx_free(pcx);
+    omf_free(pcx);
+    return SD_SUCCESS;
+}
+
+int sd_bk_save(const sd_bk_file *bk, const path *filename) {
+    int ret;
+
+    sd_writer *w = sd_writer_open(filename);
+    if(!w) {
+        return SD_FILE_OPEN_ERROR;
+    }
+
+    // Write header
+    sd_write_udword(w, bk->file_id);
+    sd_write_ubyte(w, bk->unknown_a);
+
+    // Write background size. In practice, this is always 320x200.
+    // Still, let's take it srsly.
+    if(bk->background != NULL) {
+        sd_write_uword(w, bk->background->w);
+        sd_write_uword(w, bk->background->h);
+    } else {
+        sd_write_uword(w, 320);
+        sd_write_uword(w, 200);
+    }
+
+    // Write animations
+    long rpos = 0;
+    for(uint8_t i = 0; i < MAX_BK_ANIMS; i++) {
+        const sd_bk_anim *bka = array_get(&bk->anims, i);
+        if(bka != NULL) {
+            const long opos = sd_writer_pos(w); // remember where we need to fill in the blank
+            if(opos < 0) {
+                goto error;
+            }
+            sd_write_udword(w, 0); // write a 0 as a placeholder
+            sd_write_ubyte(w, i);
+            if((ret = sd_bk_anim_save(w, bka)) != SD_SUCCESS) {
+                sd_writer_close(w);
+                return ret;
+            }
+            rpos = sd_writer_pos(w);
+            if(rpos < 0) {
+                goto error;
+            }
+            if(sd_writer_seek_start(w, opos) < 0) {
+                goto error;
+            }
+            sd_write_udword(w, rpos); // write the actual size
+            if(sd_writer_seek_start(w, rpos) < 0) {
+                goto error;
+            }
+        }
+    }
+    sd_write_udword(w, rpos);
+    sd_write_ubyte(w, MAX_BK_ANIMS + 1); // indicate end of animations
+
+    // Write background image. If none exists, write black image.
+    if(bk->background != NULL) {
+        sd_write_buf(w, bk->background->data, bk->background->len);
+    } else {
+        sd_write_fill(w, 0, 64000);
+    }
+
+    // Write palettes
+    sd_write_ubyte(w, bk->palette_count);
+    for(uint8_t i = 0; i < bk->palette_count; i++) {
+        palette_save(w, bk->palettes[i]);
+        palette_remaps_save(w, bk->remaps[i]);
+    }
+
+    // Write soundtable
+    sd_write_buf(w, bk->soundtable, 30);
+
+    if(sd_writer_errno(w)) {
+        goto error;
+    }
+
+    // All done, close writer
+    sd_writer_close(w);
+    return SD_SUCCESS;
+
+error:
+    path_unlink(filename);
+    sd_writer_close(w);
+    return SD_FILE_WRITE_ERROR;
+}
+
+void sd_bk_set_background(sd_bk_file *bk, const sd_vga_image *img) {
+    assert(bk != NULL);
+    if(bk->background != NULL) {
+        sd_vga_image_free(bk->background);
+        omf_free(bk->background);
+    }
+    if(img == NULL) {
+        return;
+    }
+    bk->background = omf_calloc(1, sizeof(sd_vga_image));
+    sd_vga_image_copy(bk->background, img);
+}
+
+sd_vga_image *sd_bk_get_background(const sd_bk_file *bk) {
+    return bk->background;
+}
+
+int sd_bk_set_anim(sd_bk_file *bk, int index, const sd_bk_anim *anim) {
+    assert(bk != NULL);
+    if(index < 0 || index >= MAX_BK_ANIMS) {
+        return SD_INVALID_INPUT;
+    }
+
+    array_delete_at(&bk->anims, index);
+    if(anim == NULL) {
+        return SD_SUCCESS;
+    }
+
+    sd_bk_anim *copy = omf_calloc(1, sizeof(sd_bk_anim));
+    array_set(&bk->anims, index, copy);
+    sd_bk_anim_copy(copy, anim);
+    return SD_SUCCESS;
+}
+
+sd_bk_anim *sd_bk_get_anim(const sd_bk_file *bk, int index) {
+    if(index < 0 || index >= MAX_BK_ANIMS || bk == NULL) {
+        return NULL;
+    }
+    return array_get(&bk->anims, index);
+}
+
+int sd_bk_set_palette(sd_bk_file *bk, int index, const vga_palette *pal) {
+    assert(bk != NULL);
+    assert(pal != NULL);
+    if(index < 0 || index >= bk->palette_count) {
+        return SD_INVALID_INPUT;
+    }
+
+    if(bk->palettes[index] == NULL) {
+        bk->palettes[index] = omf_malloc(sizeof(vga_palette));
+    }
+    memcpy(bk->palettes[index], pal, sizeof(vga_palette));
+    return SD_SUCCESS;
+}
+
+void sd_bk_pop_palette(sd_bk_file *bk) {
+    assert(bk != NULL);
+
+    if(bk->palette_count > 0) {
+        bk->palette_count--;
+        omf_free(bk->palettes[bk->palette_count]);
+    }
+}
+
+int sd_bk_push_palette(sd_bk_file *bk, const vga_palette *pal) {
+    assert(bk != NULL);
+    assert(pal != NULL);
+    if(bk->palette_count >= MAX_BK_PALETTES) {
+        return SD_INVALID_INPUT;
+    }
+
+    if(bk->palettes[bk->palette_count] != NULL) {
+        omf_free(bk->palettes[bk->palette_count]);
+    }
+    bk->palettes[bk->palette_count] = omf_malloc(sizeof(vga_palette));
+    memcpy(bk->palettes[bk->palette_count], pal, sizeof(vga_palette));
+    bk->palette_count++;
+
+    return SD_SUCCESS;
+}
+
+vga_palette *sd_bk_get_palette(const sd_bk_file *bk, int index) {
+    if(bk == NULL || index < 0 || index >= bk->palette_count) {
+        return NULL;
+    }
+    return bk->palettes[index];
+}
+
+void sd_bk_free(sd_bk_file *bk) {
+    int i;
+    if(bk->background != NULL) {
+        sd_vga_image_free(bk->background);
+        omf_free(bk->background);
+    }
+    array_free(&bk->anims);
+    for(i = 0; i < bk->palette_count; i++) {
+        if(bk->palettes[i] != NULL) {
+            omf_free(bk->palettes[i]);
+            omf_free(bk->remaps[i]);
+        }
+    }
+}

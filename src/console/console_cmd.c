@@ -1,0 +1,574 @@
+#include "audio/sound_opts.h"
+#include "console/console.h"
+#include "console/console_type.h"
+#include "formats/error.h"
+#include "formats/rec_assertion.h"
+#include "game/audio/music_tracker.h"
+#include "game/game_state.h"
+#include "game/gui/osd/osd.h"
+#include "game/scenes/arena.h"
+#include "game/scenes/mechlab.h"
+#include "resources/ids.h"
+#include "utils/allocator.h"
+#include "utils/log.h"
+#include "utils/miscmath.h"
+#include "utils/str.h"
+#include <stdio.h>
+
+// utils
+int strtoint(char *input, int *output) {
+    char *end;
+    *output = (int)strtol(input, &end, 10);
+    if(!*end) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+
+int sort_command_by_name(const void *a, const void *b) {
+    hashmap_pair *const *h1 = a;
+    hashmap_pair *const *h2 = b;
+    return strcmp((*h1)->key, (*h2)->key);
+}
+
+int console_cmd_history(game_state *gs, int argc, char **argv) {
+    iterator it;
+    char *input;
+    char buf[sizeof con->input];
+    int i = 1;
+
+    list_iter_begin(&con->history, &it);
+    foreach(it, input) {
+        snprintf(buf, sizeof buf, "%d. %s", i, input);
+        console_output_addline(buf);
+        i++;
+    }
+    return 0;
+}
+
+int insert_assertion(rec_assertion *op, game_state *gs) {
+    sd_rec_move mv;
+    memset(&mv, 0, sizeof(sd_rec_move));
+    char *extra_data = sd_rec_set_lookup_id(&mv, 10);
+    if(!encode_assertion(op, (uint8_t *)extra_data)) {
+        console_output_addline("failed to encode assertion\n");
+        sd_rec_move_free(&mv);
+        return 1;
+    }
+
+    mv.tick = gs->tick;
+    if(sd_rec_insert_action_at_tick(gs->rec, &mv) != SD_SUCCESS) {
+        console_output_addline("Inserting assertion failed.");
+        return 1;
+    } else {
+        console_output_addline("Inserted assertion");
+    }
+    return 0;
+}
+
+int console_cmd_clear(game_state *gs, int argc, char **argv) {
+    con->output[0] = '\0';
+    con->output_head = 0;
+    con->output_tail = 0;
+    con->output_pos = 0;
+    con->output_overflowing = 0;
+    return 0;
+}
+
+int console_cmd_quit(game_state *gs, int argc, char **argv) {
+    game_state_set_next(gs, SCENE_CREDITS);
+    return 0;
+}
+
+int console_cmd_help(game_state *gs, int argc, char **argv) {
+    // print list of commands
+    vector sorted;
+    iterator it;
+    hashmap_pair *pair, **ppair;
+
+    vector_create(&sorted, sizeof(hashmap_pair *));
+    hashmap_iter_begin(&con->cmds, &it);
+    foreach(it, pair) {
+        vector_append(&sorted, &pair);
+    }
+    vector_sort(&sorted, &sort_command_by_name);
+    vector_iter_begin(&sorted, &it);
+    foreach(it, ppair) {
+        char *name = (*ppair)->key;
+        command *cmd = (*ppair)->value;
+        console_output_add(name);
+        console_output_add(" - ");
+        console_output_addline(cmd->doc);
+    }
+    vector_free(&sorted);
+    return 0;
+}
+
+int console_cmd_scene(game_state *gs, int argc, char **argv) {
+    // change scene
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i) && is_valid_scene(i)) {
+            game_state_set_next(gs, i);
+            return 0;
+        } else if((i = scene_get_id(argv[1])) > 0) {
+            game_state_set_next(gs, i);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int console_toggle_warp(game_state *gs, int argc, char **argv) {
+    gs->warp_speed = !gs->warp_speed;
+    if(gs->warp_speed) {
+        console_output_addline("Warp speed ON");
+    } else {
+        console_output_addline("Warp speed OFF");
+    }
+    return 0;
+}
+
+int console_cmd_har(game_state *gs, int argc, char **argv) {
+    // change har
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i)) {
+            if(i < 0 || i > 10) {
+                return 1;
+            }
+
+            game_player *player = game_state_get_player(gs, 0);
+            player->pilot->har_id = i;
+            if(gs->this_id >= SCENE_ARENA0 && gs->this_id <= SCENE_ARENA4) {
+                if(scene_load_har(game_state_get_scene(gs), 0)) {
+                    return 1;
+                }
+
+                object *har_obj = game_state_find_object(gs, game_player_get_har_obj_id(player));
+                vec2i pos = object_get_pos(har_obj);
+                int hd = object_get_direction(har_obj);
+
+                object *obj = omf_calloc(1, sizeof(object));
+                object_create(obj, gs, pos, vec2f_create(0, 0));
+                // set the object to the same as the old one, so all the references remain intact
+                obj->id = har_obj->id;
+                obj->animation_state.enemy_obj_id = har_obj->animation_state.enemy_obj_id;
+
+                if(har_create(obj, game_state_get_scene(gs)->af_data[0], hd, player->pilot->har_id,
+                              player->pilot->pilot_id, 0)) {
+                    object_free(obj);
+                    omf_free(obj);
+                    return 1;
+                }
+
+                // Set HAR to controller and game_player
+                game_state_add_object(gs, obj, RENDER_LAYER_MIDDLE, 0, 0);
+
+                game_state_del_object(gs, har_obj);
+
+                // Set HAR for player
+                game_player_set_har(player, obj);
+
+                maybe_install_har_hooks(game_state_get_scene(gs));
+            } else if(gs->this_id == SCENE_MECHLAB) {
+                mechlab_update(gs->sc);
+            }
+
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int console_cmd_win(game_state *gs, int argc, char **argv) {
+    if(argc == 1) {
+        game_player *player = game_state_get_player(gs, 1);
+        object *har_obj = game_state_find_object(gs, game_player_get_har_obj_id(player));
+        if(!har_obj) {
+            return 1;
+        }
+
+        rec_assertion op;
+        op.operand1.is_literal = false;
+        op.operand1.value.attr.har_id = 1;
+        op.operand1.value.attr.attribute = ATTR_HEALTH;
+
+        op.op = OP_SET;
+
+        op.operand2.is_literal = true;
+        op.operand2.value.literal = 1;
+
+        // run the assertion so it applies
+        if(!game_state_check_assertion_is_met(&op, gs)) {
+            console_output_addline("Setting opponent health to 1 failed!");
+            return 1;
+        } else {
+            return insert_assertion(&op, gs);
+        }
+    }
+    return 1;
+}
+
+int console_cmd_lose(game_state *gs, int argc, char **argv) {
+    if(argc == 1) {
+        game_player *player = game_state_get_player(gs, 0);
+        object *har_obj = game_state_find_object(gs, game_player_get_har_obj_id(player));
+        if(!har_obj) {
+            return 1;
+        }
+
+        rec_assertion op;
+        op.operand1.is_literal = false;
+        op.operand1.value.attr.har_id = 0;
+        op.operand1.value.attr.attribute = ATTR_HEALTH;
+
+        op.op = OP_SET;
+
+        op.operand2.is_literal = true;
+        op.operand2.value.literal = 1;
+
+        // run the assertion so it applies
+        if(!game_state_check_assertion_is_met(&op, gs)) {
+            console_output_addline("Setting player health to 1 failed!");
+            return 1;
+        } else {
+            return insert_assertion(&op, gs);
+        }
+    }
+    return 1;
+}
+
+int console_cmd_stun(game_state *gs, int argc, char **argv) {
+    if(argc == 1) {
+        game_player *player = game_state_get_player(gs, 1);
+        object *har_obj = game_state_find_object(gs, game_player_get_har_obj_id(player));
+        if(!har_obj) {
+            return 1;
+        }
+        har *har = object_get_userdata(har_obj);
+        har->endurance = har->endurance_max;
+        har->state = STATE_RECOIL;
+        return 0;
+    }
+    return 1;
+}
+
+int console_cmd_rein(game_state *gs, int argc, char **argv) {
+    scene *sc = game_state_get_scene(gs);
+    if(scene_is_arena(sc)) {
+        arena_toggle_rein(sc);
+        return 0;
+    }
+    return 1;
+}
+
+int console_cmd_god(game_state *gs, int argc, char **argv) {
+    for(int i = 0; i < game_state_num_players(gs); i++) {
+        game_player *gp = game_state_get_player(gs, i);
+        gp->god = !gp->god;
+    }
+    if(game_state_get_player(gs, 0)->god) {
+        console_output_addline("God mode ON");
+    } else {
+        console_output_addline("God mode OFF");
+    }
+
+    return 0;
+}
+
+int console_kreissack(game_state *gs, int argc, char **argv) {
+    game_player *p1 = game_state_get_player(gs, 0);
+    p1->sp_wins = (2046 ^ (2 << p1->pilot->pilot_id));
+    return 0;
+}
+
+int console_cmd_ez_destruct(game_state *gs, int argc, char **argv) {
+    for(int i = 0; i < game_state_num_players(gs); i++) {
+        game_player *gp = game_state_get_player(gs, i);
+        gp->ez_destruct = !gp->ez_destruct;
+    }
+    if(game_state_get_player(gs, 0)->ez_destruct) {
+        console_output_addline("EASY DESTRUCT ON");
+    } else {
+        console_output_addline("EASY DESTRUCT OFF");
+    }
+
+    return 0;
+}
+
+int console_cmd_music(game_state *gs, int argc, char **argv) {
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i)) {
+            music_tracker_play(PSM_END + i);
+        }
+    }
+    return 0;
+}
+
+int console_cmd_sound(game_state *gs, int argc, char **argv) {
+    static const char *usage = "Usage: sound <id> [vol=N] [pan=N] [end=N] [pitch=M]";
+    if(argc < 2) {
+        console_output_addline(usage);
+        return 1;
+    }
+
+    // second arg is always the sound ID
+    int sound_id;
+    if(!strtoint(argv[1], &sound_id)) {
+        console_output_addline(usage);
+        return 1;
+    }
+
+    sound_opts opts;
+    sound_opts_init(&opts);
+
+    str arg, key, val_str;
+    str_create(&arg);
+    str_create(&key);
+    str_create(&val_str);
+
+    // walk through the args. all of them should be "key=value" fmt.
+    bool ok = true;
+    for(int i = 2; i < argc; i++) {
+        size_t eq;
+        str_from_c(&arg, argv[i]);
+        if(!str_first_of(&arg, '=', &eq)) {
+            ok = false;
+            break;
+        }
+        str_from_slice(&key, &arg, 0, eq);
+        str_from_slice(&val_str, &arg, eq + 1, str_size(&arg));
+
+        int val;
+        if(!str_to_int(&val_str, &val)) {
+            ok = false;
+            break;
+        }
+        if(str_equal_buf(&key, "vol", 3)) {
+            opts.volume = clamp(val, 0, 127);
+        } else if(str_equal_buf(&key, "pan", 3)) {
+            opts.panning = clamp(val, -100, 100);
+        } else if(str_equal_buf(&key, "end", 3)) {
+            opts.panning_end = clamp(val, -100, 100);
+            opts.has_panning_sweep = true;
+        } else if(str_equal_buf(&key, "pitch", 5)) {
+            opts.pitch = clamp(val, -128, 128);
+        } else {
+            ok = false;
+            break;
+        }
+    }
+
+    str_free(&val_str);
+    str_free(&key);
+    str_free(&arg);
+
+    if(!ok) {
+        console_output_addline(usage);
+        return 1;
+    }
+    game_state_play_sound(gs, sound_id, &opts);
+    return 0;
+}
+
+int console_cmd_money(game_state *gs, int argc, char **argv) {
+    // change pilot's money
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i)) {
+
+            game_player *player = game_state_get_player(gs, 0);
+            player->pilot->money = i;
+            if(gs->this_id == SCENE_MECHLAB) {
+                mechlab_update(gs->sc);
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int console_cmd_rank(game_state *gs, int argc, char **argv) {
+    // change tournament rank
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i)) {
+            game_player *player = game_state_get_player(gs, 0);
+            int oldrank = player->pilot->rank;
+            if(player->chr && oldrank != i && i > 0 && i <= player->pilot->enemies_ex_unranked + 1) {
+                player->pilot->rank = i;
+                // fix everyone else's rank
+                for(int k = 0; k < player->chr->pilot.enemies_ex_unranked; k++) {
+                    sd_pilot *p = &player->chr->enemies[k]->pilot;
+                    // if newrank < oldrank everyone who was below the old rank and above the new rank goes up a rank
+                    if(i < oldrank && p->rank < oldrank && p->rank >= i) {
+                        p->rank++;
+                    }
+                    // if newrank > oldrank everyone who was above the oldrank and below the newrank goes down a rank
+                    if(i > oldrank && p->rank > oldrank && p->rank <= i) {
+                        p->rank--;
+                    }
+                }
+                if(gs->this_id == SCENE_MECHLAB) {
+                    mechlab_update(gs->sc);
+                }
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+int console_cmd_score(game_state *gs, int argc, char **argv) {
+    if(argc == 2) {
+        int i;
+        if(strtoint(argv[1], &i)) {
+            game_state_get_player(gs, 0)->score.score = i;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int console_cmd_osd(game_state *gs, int argc, char **argv) {
+    if(argc < 2) {
+        console_output_addline("Usage: osd <text>");
+        return 1;
+    }
+
+    str msg;
+    str_create(&msg);
+    for(int i = 1; i < argc; i++) {
+        if(i > 1) {
+            str_append_char(&msg, ' ');
+        }
+        str_append_c(&msg, argv[i]);
+    }
+    osd_print("%s", str_c(&msg));
+    str_free(&msg);
+    return 0;
+}
+
+int console_cmd_assert(game_state *gs, int argc, char **argv) {
+    if(argc != 4) {
+        console_output_addline("Usage: assert harX.attr OP value");
+        return -1;
+    }
+
+    // check we have HARs
+    game_player *player = game_state_get_player(gs, 0);
+    object *har_obj = game_state_find_object(gs, game_player_get_har_obj_id(player));
+    if(!har_obj) {
+        return 1;
+    }
+
+    // Parse LHS: harX.attr
+    char *lh_har_part = argv[1];
+    char *dot_pos = strchr(lh_har_part, '.');
+    if(dot_pos == NULL) {
+        console_output_addline("Invalid LHS format. Expected harX.attr");
+        return 1;
+    }
+
+    // Split into har and attribute parts
+    *dot_pos = '\0'; // Terminate har part
+    char *lh_attr_part = dot_pos + 1;
+
+    rec_assertion op;
+
+    int res = rec_assertion_get_operand(&op.operand1, lh_har_part, lh_attr_part);
+    if(res == 1) {
+        console_output_addline("Invalid LHS har identifier. Use har1 or har2.\n");
+        return 1;
+    } else if(res == 2) {
+        console_output_addline("Invalid LHS har attribute");
+        return 1;
+    } else if(op.operand1.is_literal) {
+        console_output_addline("Unexpected LHS literal.<something> use a bare integer literal.");
+        return 1;
+    }
+
+    // Parse operator
+    const char *oper = argv[2];
+
+    if(strcmp(oper, ":=") == 0 || strcmp(oper, "set") == 0) {
+        op.op = OP_SET;
+    } else if(strcmp(oper, "==") == 0 || strcmp(oper, "eq") == 0) {
+        op.op = OP_EQ;
+    } else if(strcmp(oper, ">") == 0 || strcmp(oper, "gt") == 0) {
+        op.op = OP_GT;
+    } else if(strcmp(oper, "<") == 0 || strcmp(oper, "lt") == 0) {
+        op.op = OP_LT;
+    } else {
+        console_output_addline("Invalid operator. Use ==, >, <, or := (or eq, gt, lt, or set).");
+        return 1;
+    }
+
+    char *rh_har_part = argv[3];
+    dot_pos = strchr(argv[3], '.');
+    if(dot_pos != NULL) { // RHS is har.attr
+        *dot_pos = '\0';  // Terminate har part
+        char *rh_attr_part = dot_pos + 1;
+
+        res = rec_assertion_get_operand(&op.operand2, rh_har_part, rh_attr_part);
+        if(res == 1) {
+            console_output_addline("Invalid RHS har identifier. Use har1 or har2.\n");
+            return 1;
+        } else if(res == 2) {
+            console_output_addline("Invalid RHS har attribute");
+            return 1;
+        } else if(op.operand2.is_literal) {
+            console_output_addline("Unexpected RHS literal.<something> use a bare integer literal.");
+            return 1;
+        }
+
+    } else { // RHS is integer
+        char *endptr;
+        long rhs_long = strtol(argv[3], &endptr, 10);
+        if(endptr == argv[3] || *endptr != '\0') {
+            console_output_addline("Invalid RHS integer literal.");
+            return 1;
+        }
+        op.operand2.is_literal = true;
+        op.operand2.value.literal = rhs_long;
+    }
+
+    log_assertion(&op);
+
+    if(!game_state_check_assertion_is_met(&op, gs)) {
+        console_output_addline("Assertion failed!");
+        return 1;
+    } else {
+        return insert_assertion(&op, gs);
+    }
+}
+
+void console_init_cmd(void) {
+    // Add console commands
+    console_add_cmd("h", &console_cmd_history, "show command history");
+    console_add_cmd("clear", &console_cmd_clear, "clear the console");
+    console_add_cmd("cls", &console_cmd_clear, "clear the console");
+    console_add_cmd("quit", &console_cmd_quit, "quit the game");
+    console_add_cmd("exit", &console_cmd_quit, "quit the game");
+    console_add_cmd("help", &console_cmd_help, "show all commands");
+    console_add_cmd("scene", &console_cmd_scene, "change scene. usage: scene 1, scene 2, etc");
+    console_add_cmd("music", &console_cmd_music, "Play specified song (0-6)");
+    console_add_cmd("sound", &console_cmd_sound, "Play a sound");
+    console_add_cmd("har", &console_cmd_har, "change har. usage: har 1, har 2, etc");
+    console_add_cmd("win", &console_cmd_win, "Set the other player's health to 0");
+    console_add_cmd("lose", &console_cmd_lose, "Set your health to 0");
+    console_add_cmd("stun", &console_cmd_stun, "Stun the other player");
+    console_add_cmd("rein", &console_cmd_rein, "R-E-I-N!");
+    console_add_cmd("god", &console_cmd_god, "Enable god mode");
+    console_add_cmd("kreissack", &console_kreissack, "Fight Kreissack");
+    console_add_cmd("ez-destruct", &console_cmd_ez_destruct, "Punch = destruction, kick = scrap");
+    console_add_cmd("warp", &console_toggle_warp, "Toggle warp speed");
+    console_add_cmd("money", &console_cmd_money, "Set tournament mode money");
+    console_add_cmd("rank", &console_cmd_rank, "Set tournament mode rank");
+    console_add_cmd("assert", &console_cmd_assert, "Insert an assertion into the current REC file");
+    console_add_cmd("score", &console_cmd_score, "Set current score");
+    console_add_cmd("osd", &console_cmd_osd, "Push a text blob to the on-screen display");
+}

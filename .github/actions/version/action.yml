@@ -1,0 +1,13 @@
+name: OpenOMF Version
+runs:
+  using: "composite"
+  steps:
+    - name: Set OPENOMF_VERSION
+      shell: bash
+      run: |
+        if CMAKE_OUTPUT=`cmake -P cmake-scripts/version.cmake 2>&1`; then
+            echo "OPENOMF_VERSION=${CMAKE_OUTPUT}" >> $GITHUB_ENV
+        else
+            echo "${CMAKE_OUTPUT}"
+            exit 1
+        fi

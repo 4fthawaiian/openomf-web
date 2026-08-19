@@ -1,0 +1,949 @@
+/** @file main.c
+ * @brief .AF file editor tool
+ * @author Tuomas Virtanen
+ * @license MIT
+ */
+
+#include "../shared/animation_misc.h"
+#include "../shared/conversions.h"
+#include "formats/af.h"
+#include "formats/error.h"
+#include "utils/c_array_util.h"
+#include <SDL.h>
+#include <argtable3.h>
+#include <stdint.h>
+#include <string.h>
+
+void move_info(sd_move *mv, sd_animation *ani, int move);
+
+int check_move_sprite(sd_af_file *af, int move, int sprite) {
+    if(move >= MAX_AF_MOVES || move < 0 || sd_af_get_move(af, move) == 0) {
+        printf("animation #%d does not exist.\n", move);
+        return 0;
+    }
+    if(sprite < 0 || sprite >= sd_animation_get_sprite_count(sd_af_get_move(af, move)->animation)) {
+        printf("Sprite #%d does not exist.\n", sprite);
+        return 0;
+    }
+    return 1;
+}
+
+int check_move(sd_af_file *af, int move) {
+    if(sd_af_get_move(af, move) == 0 || move >= MAX_AF_MOVES || move < 0) {
+        printf("animation #%d does not exist.\n", move);
+        return 0;
+    }
+    return 1;
+}
+
+// Sprite stuff --------------------------------------
+
+void sprite_play(sd_af_file *af, sd_bk_file *bk, int scale, int anim, int sprite) {
+    if(!check_move_sprite(af, anim, sprite)) {
+        return;
+    }
+    SDL_Surface *surface;
+    SDL_Texture *texture;
+    SDL_Texture *rendertarget;
+    SDL_Rect rect;
+    SDL_Rect dstrect;
+    sd_sprite *s = sd_animation_get_sprite(sd_af_get_move(af, anim)->animation, sprite);
+    SDL_Window *window = SDL_CreateWindow("OMF2097 Remake", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 320 * scale,
+                                          200 * scale, SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL);
+
+    if(!window) {
+        printf("Could not create window: %s\n", SDL_GetError());
+        return;
+    }
+
+    printf("Sprite Info: pos=(%d,%d) size=(%d,%d) len=%u\n", s->pos.x, s->pos.y, s->width, s->height, s->len);
+
+    SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    uint32_t rmask = 0x000000ff;
+    uint32_t gmask = 0x0000ff00;
+    uint32_t bmask = 0x00ff0000;
+    uint32_t amask = 0xff000000;
+
+    if((rendertarget = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, 320, 200)) ==
+       0) {
+        printf("Could not create texture: %s\n", SDL_GetError());
+        return;
+    }
+
+    sd_rgba_image img;
+    sd_sprite_rgba_decode(&img, s, bk->palettes[0]);
+
+    if(!(surface =
+             SDL_CreateRGBSurfaceFrom((void *)img.data, img.w, img.h, 32, img.w * 4, rmask, gmask, bmask, amask))) {
+        printf("Could not create surface: %s\n", SDL_GetError());
+        return;
+    }
+
+    if((texture = SDL_CreateTextureFromSurface(renderer, surface)) == 0) {
+        printf("Could not create texture: %s\n", SDL_GetError());
+        return;
+    }
+
+    SDL_FreeSurface(surface);
+    sd_rgba_image_free(&img);
+
+    rect.x = s->pos.x + 160;
+    rect.y = s->pos.y + 100;
+    rect.w = s->width;
+    rect.h = s->height;
+
+    dstrect.x = 0;
+    dstrect.y = 0;
+    dstrect.w = 320 * scale;
+    dstrect.h = 200 * scale;
+
+    while(1) {
+        SDL_Event e;
+        if(SDL_PollEvent(&e)) {
+            if(e.type == SDL_QUIT) {
+                break;
+            } else if(e.type == SDL_KEYUP) {
+                int i = anim;
+                int changed = 0;
+                switch(e.key.keysym.sym) {
+                    case SDLK_RIGHT:
+                        sprite = (sprite + 1) % sd_animation_get_sprite_count(sd_af_get_move(af, anim)->animation);
+                        printf("sprite is now %d\n", sprite);
+                        changed = 1;
+                        break;
+                    case SDLK_LEFT:
+                        sprite--;
+                        if(sprite < 0) {
+                            sprite = sd_animation_get_sprite_count(sd_af_get_move(af, anim)->animation) - 1;
+                        }
+                        changed = 1;
+                        break;
+                    case SDLK_UP:
+                        i++;
+                        while(!check_move(af, i) && i < 50) {
+                            i++;
+                        }
+                        if(i == 50) {
+                            printf("no more animations\n");
+                        } else {
+                            anim = i;
+                            printf("UP: animation is now %d\n", anim);
+                            sprite = 0;
+                        }
+                        changed = 1;
+                        break;
+                    case SDLK_DOWN:
+                        i--;
+                        while(!check_move(af, i) && i >= 0) {
+                            i--;
+                        }
+                        if(i < 0) {
+                            printf("no previous animations\n");
+                        } else {
+                            anim = i;
+                            printf("DOWN: animation is now %d\n", anim);
+                            sprite = 0;
+                        }
+                        changed = 1;
+                        break;
+                    case SDLK_p: {
+                        // print the move info
+                        sd_move *mv = sd_af_get_move(af, i);
+                        sd_animation *ani = mv->animation;
+                        move_info(mv, ani, i);
+                        changed = 0;
+                    } break;
+                    default:
+                        changed = 0;
+                }
+                if(changed) {
+                    s = sd_animation_get_sprite(sd_af_get_move(af, anim)->animation, sprite);
+                    sd_sprite_rgba_decode(&img, s, bk->palettes[0]);
+                    printf("Sprite Info: pos=(%d,%d) size=(%d,%d) len=%u\n", s->pos.x, s->pos.y, s->width, s->height,
+                           s->len);
+
+                    if(!(surface = SDL_CreateRGBSurfaceFrom((void *)img.data, img.w, img.h, 32, img.w * 4, rmask, gmask,
+                                                            bmask, amask))) {
+                        printf("Could not create surface: %s\n", SDL_GetError());
+                        return;
+                    }
+
+                    if((texture = SDL_CreateTextureFromSurface(renderer, surface)) == 0) {
+                        printf("Could not create texture: %s\n", SDL_GetError());
+                        return;
+                    }
+
+                    SDL_FreeSurface(surface);
+                    sd_rgba_image_free(&img);
+
+                    rect.x = s->pos.x + 160;
+                    rect.y = s->pos.y + 100;
+                    rect.w = s->width;
+                    rect.h = s->height;
+                }
+            }
+        }
+        SDL_RenderClear(renderer);
+        SDL_SetRenderTarget(renderer, rendertarget);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+        SDL_RenderFillRect(renderer, &dstrect);
+        SDL_RenderCopy(renderer, texture, NULL, &rect);
+
+        // render the collision data
+        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+        const sd_animation *animation = sd_af_get_move(af, anim)->animation;
+        iterator it;
+        sd_coord *coord;
+        vector_iter_begin(&animation->coord_table, &it);
+        foreach(it, coord) {
+            if(coord->frame_id == sprite) {
+                SDL_RenderDrawPoint(renderer, 160 + coord->pos.x, 100 + coord->pos.y);
+            }
+        }
+
+        // Switch to screen target & scale
+        SDL_SetRenderTarget(renderer, NULL);
+        SDL_RenderCopy(renderer, rendertarget, NULL, &dstrect);
+        SDL_RenderPresent(renderer);
+        SDL_Delay(1); // don't chew too much CPU
+    }
+
+    // Close and destroy the window
+    SDL_DestroyWindow(window);
+
+    // Clean up
+    SDL_Quit();
+}
+
+// Move stuff --------------------------------------------------
+
+int move_key_get_id(const char *key) {
+    if(strcmp(key, "unknown_0") == 0) {
+        return 30;
+    } else if(strcmp(key, "unknown_2") == 0) {
+        return 31;
+    } else if(strcmp(key, "unknown_4") == 0) {
+        return 33;
+    } else if(strcmp(key, "unknown_5") == 0) {
+        return 34;
+    } else if(strcmp(key, "unknown_6") == 0) {
+        return 35;
+    } else if(strcmp(key, "unknown_7") == 0) {
+        return 36;
+    } else if(strcmp(key, "unknown_8") == 0) {
+        return 37;
+    } else if(strcmp(key, "unknown_9") == 0) {
+        return 38;
+    } else if(strcmp(key, "unknown_10") == 0) {
+        return 39;
+    } else if(strcmp(key, "unknown_11") == 0) {
+        return 40;
+    } else if(strcmp(key, "play_if_hit") == 0) {
+        return 41;
+    } else if(strcmp(key, "category") == 0) {
+        return 42;
+    } else if(strcmp(key, "block_damage") == 0) {
+        return 43;
+    } else if(strcmp(key, "block_stun") == 0) {
+        return 44;
+    } else if(strcmp(key, "successor_id") == 0) {
+        return 45;
+    } else if(strcmp(key, "damage_amount") == 0) {
+        return 46;
+    } else if(strcmp(key, "unknown_18") == 0) {
+        return 47;
+    } else if(strcmp(key, "unknown_19") == 0) {
+        return 48;
+    } else if(strcmp(key, "points") == 0) {
+        return 49;
+    } else if(strcmp(key, "move_string") == 0) {
+        return 15;
+    } else if(strcmp(key, "footer_string") == 0) {
+        return 16;
+    }
+    return anim_key_get_id(key);
+}
+
+void move_set_key(sd_move *move, sd_animation *ani, const char **key, int kcount, const char *value) {
+    int tmp = 0;
+    int kn = move_key_get_id(key[0]);
+    switch(kn) {
+
+        case 30:
+            move->ai_flags = conv_uword(value);
+            break;
+        case 31:
+            move->pos_constraint = conv_uword(value);
+            break;
+        case 33:
+            move->unknown_4 = conv_ubyte(value);
+            break;
+        case 34:
+            move->unknown_5 = conv_ubyte(value);
+            break;
+        case 35:
+            move->unknown_6 = conv_ubyte(value);
+            break;
+        case 36:
+            move->unknown_7 = conv_ubyte(value);
+            break;
+        case 37:
+            move->unknown_8 = conv_ubyte(value);
+            break;
+        case 38:
+            move->unknown_9 = conv_ubyte(value);
+            break;
+        case 39:
+            move->unknown_10 = conv_ubyte(value);
+            break;
+        case 40:
+            move->unknown_11 = conv_ubyte(value);
+            break;
+        case 41:
+            move->play_if_hit = conv_ubyte(value);
+            break;
+        case 42:
+            move->category = conv_ubyte(value);
+            break;
+        case 43:
+            move->block_damage = conv_ubyte(value);
+            break;
+        case 44:
+            move->block_stun = conv_ubyte(value);
+            break;
+        case 45:
+            move->successor_id = conv_ubyte(value);
+            break;
+        case 46:
+            move->damage_amount = conv_ubyte(value);
+            break;
+        case 47:
+            move->throw_duration = conv_ubyte(value);
+            break;
+        case 48:
+            move->extra_string_selector = conv_ubyte(value);
+            break;
+        case 49:
+            move->points = conv_ubyte(value);
+            break;
+
+        case 15:
+            tmp = strlen(value) + 1;
+            if(tmp < 21) {
+                str_set_c(&move->move_string, value);
+            } else {
+                printf("String is too long! (%d bytes) Maximum size for move_string is 21 characters!\n", tmp);
+                return;
+            }
+            break;
+        case 16:
+            str_set_c(&move->footer_string, value);
+            break;
+        default:
+            anim_set_key(ani, kn, key, kcount, value);
+            return;
+    }
+    printf("Value set!\n");
+}
+
+void move_get_key(sd_move *move, sd_animation *ani, const char **key, int kcount, int pcount) {
+    int kn = move_key_get_id(key[0]);
+    switch(kn) {
+        case 30:
+            printf("%d\n", move->ai_flags);
+            break;
+        case 31:
+            printf("%d\n", move->pos_constraint);
+            break;
+        case 33:
+            printf("%d\n", move->unknown_4);
+            break;
+        case 34:
+            printf("%d\n", move->unknown_5);
+            break;
+        case 35:
+            printf("%d\n", move->unknown_6);
+            break;
+        case 36:
+            printf("%d\n", move->unknown_7);
+            break;
+        case 37:
+            printf("%d\n", move->unknown_8);
+            break;
+        case 38:
+            printf("%d\n", move->unknown_9);
+            break;
+        case 39:
+            printf("%d\n", move->unknown_10);
+            break;
+        case 40:
+            printf("%d\n", move->unknown_11);
+            break;
+        case 41:
+            printf("%d\n", move->play_if_hit);
+            break;
+        case 42:
+            printf("%d\n", move->category);
+            break;
+        case 43:
+            printf("%d\n", move->block_damage);
+            break;
+        case 44:
+            printf("%d\n", move->block_stun);
+            break;
+        case 45:
+            printf("%d\n", move->successor_id);
+            break;
+        case 46:
+            printf("%d\n", move->damage_amount);
+            break;
+        case 47:
+            printf("%d\n", move->throw_duration);
+            break;
+        case 48:
+            printf("%d\n", move->extra_string_selector);
+            break;
+        case 49:
+            printf("%d\n", move->points);
+            break;
+        case 15:
+            printf("%s\n", str_c(&move->move_string));
+            break;
+        case 16:
+            printf("%s\n", str_c(&move->footer_string));
+            break;
+        default:
+            anim_get_key(ani, kn, key, kcount, pcount);
+    }
+}
+
+void move_play(sd_af_file *af, sd_bk_file *bk, int scale, int anim) {
+    sprite_play(af, bk, scale, anim, 0);
+}
+
+void move_keylist(void) {
+    printf("Valid field keys for Move structure:\n");
+    anim_keylist();
+
+    printf("* unknown_0\n");
+    printf("* unknown_2\n");
+    printf("* unknown_4\n");
+    printf("* unknown_5\n");
+    printf("* unknown_6\n");
+    printf("* unknown_7\n");
+    printf("* unknown_8\n");
+    printf("* unknown_9\n");
+    printf("* unknown_10\n");
+    printf("* unknown_11\n");
+    printf("* play_if_hit\n");
+    printf("* category\n");
+    printf("* block_damage\n");
+    printf("* block_stun\n");
+    printf("* successor_id\n");
+    printf("* damage_amount\n");
+    printf("* unknown_18\n");
+    printf("* unknown_19\n");
+    printf("* points\n");
+    printf("* move_string <21 chars max>\n");
+    printf("* footer_string\n");
+}
+
+void move_info(sd_move *move, sd_animation *ani, int move_id) {
+    printf("Move #%d information:\n\n", move_id);
+
+    anim_common_info(ani);
+
+    printf("\nAF specific footer:\n");
+    printf(" * ai_flags:        %d\n", move->ai_flags);
+    printf(" * pos_constraint:  %d\n", move->pos_constraint);
+    printf(" * unknown_4:       %d\n", move->unknown_4);
+    printf(" * unknown_5:       %d\n", move->unknown_5);
+    printf(" * unknown_6:       %d\n", move->unknown_6);
+    printf(" * unknown_7:       %d\n", move->unknown_7);
+    printf(" * unknown_8:       %d\n", move->unknown_8);
+    printf(" * unknown_9:       %d\n", move->unknown_9);
+    printf(" * unknown_10:      %d\n", move->unknown_10);
+    printf(" * unknown_11:      %d\n", move->unknown_11);
+    printf(" * play_if_hit:     %d\n", move->play_if_hit);
+    printf(" * category:        %d\n", move->category);
+    printf(" * block_damage:    %d\n", move->block_damage);
+    printf(" * block_stun:      %d\n", move->block_stun);
+    printf(" * successor_id:    %d\n", move->successor_id);
+    printf(" * damage_amount:   %d\n", move->damage_amount);
+    printf(" * throw_duration:  %d\n", move->throw_duration);
+    printf(" * extra_string_selector: %d\n", move->extra_string_selector);
+    printf(" * points:          %d\n", move->points);
+
+    printf(" * Move string:     %s\n", str_c(&move->move_string));
+    printf(" * Footer string:   %s\n", str_c(&move->footer_string));
+}
+
+// AF Specific stuff -----------------------------------------------
+
+int af_key_get_id(const char *key) {
+    if(strcmp(key, "fighter_id") == 0) {
+        return 0;
+    } else if(strcmp(key, "exec_window") == 0) {
+        return 1;
+    } else if(strcmp(key, "endurance") == 0) {
+        return 2;
+    } else if(strcmp(key, "upwards_jump_frame_limit") == 0) {
+        return 3;
+    } else if(strcmp(key, "health") == 0) {
+        return 4;
+    } else if(strcmp(key, "forward_speed") == 0) {
+        return 5;
+    } else if(strcmp(key, "reverse_speed") == 0) {
+        return 6;
+    } else if(strcmp(key, "jump_speed") == 0) {
+        return 7;
+    } else if(strcmp(key, "fall_speed") == 0) {
+        return 8;
+    } else if(strcmp(key, "version_1") == 0) {
+        return 9;
+    } else if(strcmp(key, "sound_table") == 0) {
+        return 10;
+    }
+    return -1;
+}
+
+void af_get_key(sd_af_file *af, const char **key, int kcount) {
+    int tmp = 0;
+    switch(af_key_get_id(key[0])) {
+        case 0:
+            printf("%d\n", af->fighter_id);
+            break;
+        case 1:
+            printf("%d\n", af->exec_window);
+            break;
+        case 2:
+            printf("%f\n", af->endurance);
+            break;
+        case 3:
+            printf("%d\n", af->upwards_jump_frame_limit);
+            break;
+        case 4:
+            printf("%d\n", af->health);
+            break;
+        case 5:
+            printf("%f\n", af->forward_speed);
+            break;
+        case 6:
+            printf("%f\n", af->reverse_speed);
+            break;
+        case 7:
+            printf("%f\n", af->jump_speed);
+            break;
+        case 8:
+            printf("%f\n", af->fall_speed);
+            break;
+        case 9:
+            printf("%d\n", af->version_1);
+            break;
+        case 10:
+            if(kcount == 2) {
+                tmp = conv_ubyte(key[1]);
+                if(tmp < 30) {
+                    printf("%d\n", af->sound_table[tmp]);
+                } else {
+                    printf("Soundtable index %d does not exist!\n", tmp);
+                }
+            } else {
+                for(int i = 0; i < 30; i++) {
+                    printf("%d ", af->sound_table[i]);
+                }
+                printf("\n");
+            }
+            break;
+        default:
+            printf("Unknown key!\n");
+    }
+}
+
+void af_set_key(sd_af_file *af, const char **key, int kcount, const char *value) {
+    int tmp = 0;
+    switch(af_key_get_id(key[0])) {
+        case 0:
+            af->fighter_id = conv_uword(value);
+            break;
+        case 1:
+            af->exec_window = conv_uword(value);
+            break;
+        case 2:
+            af->endurance = conv_float(value);
+            break;
+        case 3:
+            af->upwards_jump_frame_limit = conv_ubyte(value);
+            break;
+        case 4:
+            af->health = conv_uword(value);
+            break;
+        case 5:
+            af->forward_speed = conv_float(value);
+            break;
+        case 6:
+            af->reverse_speed = conv_float(value);
+            break;
+        case 7:
+            af->jump_speed = conv_float(value);
+            break;
+        case 8:
+            af->fall_speed = conv_float(value);
+            break;
+        case 9:
+            af->version_1 = conv_uword(value);
+            break;
+        case 10:
+            if(kcount == 2) {
+                tmp = conv_ubyte(key[1]);
+                if(tmp < 30) {
+                    af->sound_table[tmp] = conv_ubyte(value);
+                } else {
+                    printf("Soundtable index %d does not exist!\n", tmp);
+                    return;
+                }
+            } else {
+                printf("Soundtable value requires index parameter (eg. --key soundtable --key 3).\n");
+                return;
+            }
+            break;
+        default:
+            printf("Unknown key!\n");
+            return;
+    }
+    printf("Value set!\n");
+}
+
+void af_keylist(void) {
+    printf("Valid field keys for AF file root:\n");
+    printf("* fighter_id\n");
+    printf("* exec_window\n");
+    printf("* endurance\n");
+    printf("* upwards_jump_frame_limit\n");
+    printf("* health\n");
+    printf("* forward_speed\n");
+    printf("* reverse_speed\n");
+    printf("* jump_speed\n");
+    printf("* fall_speed\n");
+    printf("* version_1\n");
+    printf("* footer <byte #>\n");
+}
+
+void af_info(sd_af_file *af) {
+    printf("AF File information:\n");
+    printf(" * Fighter ID:       %d\n", af->fighter_id);
+    printf(" * Exec window:      %d\n", af->exec_window);
+    printf(" * Endurance:        %f\n", af->endurance);
+    printf(" * Jump frame limit: %d\n", af->upwards_jump_frame_limit);
+    printf(" * Health:           %d\n", af->health);
+    printf(" * Fwd speed:        %f\n", af->forward_speed);
+    printf(" * Rev speed:        %f\n", af->reverse_speed);
+    printf(" * Jump speed:       %f\n", af->jump_speed);
+    printf(" * Fall speed:       %f\n", af->fall_speed);
+    printf(" * Version 1:        %d\n", af->version_1);
+
+    printf(" * Animations:  ");
+    int start = -1, last = -1;
+    int m;
+    for(m = 0; m < MAX_AF_MOVES; m++) {
+        if(sd_af_get_move(af, m)) {
+            if(start == -1) {
+                start = m;
+                last = m;
+            }
+            if(m > last + 1) {
+                if(start == last) {
+                    printf("%d, ", last);
+                } else {
+                    printf("%d-%d, ", start, last);
+                }
+                start = m;
+            }
+            last = m;
+        }
+    }
+    if(m != last) {
+        if(start == last) {
+            printf("%d\n", last);
+        } else {
+            printf("%d-%d\n", start, last);
+        }
+    } else {
+        printf("\n");
+    }
+
+    printf(" * Sound table:\n");
+    printf("   |");
+    for(int k = 0; k < 30; k++) {
+        printf("%2d ", k);
+    }
+    printf("|\n");
+    printf("   |");
+    for(int k = 0; k < 30 * 3; k++) {
+        printf("-");
+    }
+    printf("|\n");
+    printf("   |");
+    for(int k = 0; k < 30; k++) {
+        printf("%2d ", af->sound_table[k]);
+    }
+    printf("|\n");
+}
+
+void move_strip_key(sd_move *move, sd_animation *ani, const char **key, int kcount, const char *tag) {
+    int kn = move_key_get_id(key[0]);
+    switch(kn) {
+        case 16:
+            string_strip(&move->footer_string, tag);
+            break;
+        default:
+            anim_strip_key(ani, kn, key, kcount, tag);
+            return;
+    }
+    printf("Tag stripped!\n");
+}
+
+int main(int argc, char *argv[]) {
+    // commandline argument parser options
+    struct arg_lit *help = arg_lit0("h", "help", "print this help and exit");
+    struct arg_lit *vers = arg_lit0("v", "version", "print version information and exit");
+    struct arg_file *file = arg_file0("f", "file", "<file>", "Input .AF file");
+    struct arg_lit *new = arg_lit0("n", "new", "Creates a new structure for editing.");
+    struct arg_int *move = arg_int0("m", "move", "<move_id>", "Select move");
+    struct arg_lit *all_moves = arg_lit0("A", "all_moves", "All moves");
+    struct arg_int *sprite = arg_int0("s", "sprite", "<sprite_id>", "Select sprite (requires --move)");
+    struct arg_lit *keylist = arg_lit0(NULL, "keylist", "Prints a list of valid fields for --key.");
+    struct arg_str *key = arg_strn("k", "key", "<key>", 0, 2, "Select key");
+    struct arg_str *value = arg_str0(NULL, "value", "<value>", "Set value (requires --key)");
+    struct arg_str *strip = arg_str0(NULL, "strip", "<tag>", "Strip tag from selected file, move or key (string)");
+    struct arg_file *output = arg_file0("o", "output", "<file>", "Output .AF file");
+    struct arg_file *pal = arg_file0("p", "palette", "<file>", "BK file for palette");
+    struct arg_lit *play = arg_lit0(NULL, "play", "Play animation or sprite (requires --anim and --palette)");
+    struct arg_int *scale = arg_int0(NULL, "scale", "<factor>", "Scales sprites (requires --play)");
+    struct arg_lit *parse = arg_lit0(NULL, "parse", "Parse value (requires --key)");
+    struct arg_end *end = arg_end(20);
+    void *argtable[] = {help,  vers,  file,   new, move, all_moves, sprite, keylist, key,
+                        value, strip, output, pal, play, scale,     parse,  end};
+    const char *progname = "aftool";
+
+    // Make sure everything got allocated
+    if(arg_nullcheck(argtable) != 0) {
+        printf("%s: insufficient memory\n", progname);
+        goto exit_0;
+    }
+
+    // Parse arguments
+    int nerrors = arg_parse(argc, argv, argtable);
+
+    // Handle help
+    if(help->count > 0) {
+        printf("Usage: %s", progname);
+        arg_print_syntax(stdout, argtable, "\n");
+        printf("\nArguments:\n");
+        arg_print_glossary(stdout, argtable, "%-25s %s\n");
+        goto exit_0;
+    }
+
+    // Handle version
+    if(vers->count > 0) {
+        printf("%s v0.1\n", progname);
+        printf("Command line One Must Fall 2097 .AF file editor.\n");
+        printf("Source code is available at https://github.com/omf2097 under MIT license.\n");
+        printf("(C) 2013 Tuomas Virtanen\n");
+        goto exit_0;
+    }
+
+    // Argument dependencies
+    if(move->count == 0) {
+        if(sprite->count > 0) {
+            printf("--sprite requires --move\n");
+            printf("Try '%s --help' for more information.\n", progname);
+            goto exit_0;
+        }
+    }
+    if(key->count == 0) {
+        if(value->count > 0) {
+            printf("--value requires --key\n");
+            printf("Try '%s --help' for more information.\n", progname);
+            goto exit_0;
+        }
+    }
+    if(output->count == 0) {
+        if(value->count > 0) {
+            printf("--value requires --output\n");
+            printf("Try '%s --help' for more information.\n", progname);
+            goto exit_0;
+        }
+    }
+    if(play->count == 0) {
+        if(scale->count > 0) {
+            printf("--scale requires --play\n");
+            printf("Try '%s --help' for more information.\n", progname);
+            goto exit_0;
+        }
+    }
+    if(pal->count == 0) {
+        if(play->count > 0) {
+            printf("--play requires --palette\n");
+            printf("Try '%s --help' for more information.\n", progname);
+            goto exit_0;
+        }
+    }
+    if(file->count == 0 && new->count == 0) {
+        printf("Either --file or --new argument required!\n");
+        goto exit_0;
+    }
+    if(file->count == 1 && new->count == 1) {
+        printf("Define at most one of (--file, --new).\n");
+        goto exit_0;
+    }
+
+    // Handle errors
+    if(nerrors > 0) {
+        arg_print_errors(stdout, end, progname);
+        printf("Try '%s --help' for more information.\n", progname);
+        goto exit_0;
+    }
+
+    // Init SDL
+    SDL_Init(SDL_INIT_VIDEO);
+
+    path input_filename;
+    path_from_c(&input_filename, file->filename[0]);
+
+    // Load file
+    sd_af_file af;
+    sd_af_create(&af);
+    if(file->count > 0) {
+        int ret = sd_af_load(&af, &input_filename);
+        if(ret != SD_SUCCESS) {
+            printf("Unable to load AF file! [%d] %s.\n", ret, sd_get_error(ret));
+            goto exit_1;
+        }
+    }
+
+    // Palette
+    sd_bk_file bk;
+    sd_bk_create(&bk);
+    if(pal->count > 0) {
+        path pal_filename;
+        path_from_c(&pal_filename, pal->filename[0]);
+        int ret = sd_bk_load(&bk, &pal_filename);
+        if(ret != SD_SUCCESS) {
+            printf("Unable to load Palette BK file! [%d] %s\n", ret, sd_get_error(ret));
+            goto exit_2;
+        }
+    }
+
+    // Scaling variable
+    int _sc = 1;
+    if(scale->count > 0) {
+        _sc = scale->ival[0];
+        if(_sc > 4) {
+            _sc = 4;
+        } else if(_sc < 1) {
+            _sc = 1;
+        }
+    }
+
+    // Check args
+    if(sprite->count > 0) {
+        // Make sure sprite exists.
+        if(!check_move_sprite(&af, move->ival[0], sprite->ival[0])) {
+            goto exit_2;
+        }
+        sd_sprite *sp = sd_animation_get_sprite(sd_af_get_move(&af, move->ival[0])->animation, sprite->ival[0]);
+
+        // Handle arguments
+        if(key->count > 0) {
+            if(value->count > 0) {
+                sprite_set_key(sp, key->sval, key->count, value->sval[0]);
+            } else {
+                sprite_get_key(sp, key->sval, key->count);
+            }
+        } else if(keylist->count > 0) {
+            sprite_keylist();
+        } else if(play->count > 0) {
+            sprite_play(&af, &bk, _sc, move->ival[0], sprite->ival[0]);
+        } else {
+            sprite_info(sp, move->ival[0], sprite->ival[0]);
+        }
+    } else if(move->count > 0) {
+        // Make sure the Move exists
+        if(!check_move(&af, move->ival[0])) {
+            goto exit_2;
+        }
+        sd_move *mv = sd_af_get_move(&af, move->ival[0]);
+        sd_animation *ani = mv->animation;
+
+        // Handle arguments
+        if(key->count > 0) {
+            if(value->count > 0) {
+                move_set_key(mv, ani, key->sval, key->count, value->sval[0]);
+            } else if(strip->count > 0) {
+                move_strip_key(mv, ani, key->sval, key->count, strip->sval[0]);
+            } else {
+                move_get_key(mv, ani, key->sval, key->count, parse->count);
+            }
+        } else if(keylist->count > 0) {
+            move_keylist();
+        } else if(play->count > 0) {
+            move_play(&af, &bk, _sc, move->ival[0]);
+        } else {
+            move_info(mv, ani, move->ival[0]);
+        }
+    } else if(all_moves->count > 0) {
+        sd_move *mv;
+        sd_animation *ani;
+        for(int i = 0; i < MAX_AF_MOVES; i++) {
+            if(sd_af_get_move(&af, i)) {
+                mv = sd_af_get_move(&af, i);
+                ani = mv->animation;
+                if(key->count > 0) {
+                    if(value->count > 0) {
+                        move_set_key(mv, ani, key->sval, key->count, value->sval[0]);
+                    } else {
+                        printf("move %2d: ", i);
+                        move_get_key(mv, ani, key->sval, key->count, parse->count);
+                    }
+                } else {
+                    printf("\n");
+                    move_info(mv, ani, i);
+                }
+            }
+        }
+    } else {
+        if(key->count > 0) {
+            if(value->count > 0) {
+                af_set_key(&af, key->sval, key->count, value->sval[0]);
+            } else {
+                af_get_key(&af, key->sval, key->count);
+            }
+        } else if(keylist->count > 0) {
+            af_keylist();
+        } else {
+            af_info(&af);
+        }
+    }
+
+    // Write output file
+    if(output->count > 0) {
+        path output_filename;
+        path_from_c(&output_filename, output->filename[0]);
+        int ret = sd_af_save(&af, &output_filename);
+        if(ret != SD_SUCCESS) {
+            printf("Error attempting to save to %s: %s\n", path_c(&output_filename), sd_get_error(ret));
+        }
+    }
+
+    // Quit
+exit_2:
+    sd_bk_free(&bk);
+exit_1:
+    sd_af_free(&af);
+    SDL_Quit();
+exit_0:
+    arg_freetable(argtable, N_ELEMENTS(argtable));
+    return 0;
+}
