@@ -274,30 +274,46 @@
 
   /* ------------------------------ start ---------------------------- */
   var started = false;
+
+  // SDL opens its OWN AudioContext inside the wasm (Module.SDL2.audioContext).
+  // On iOS the context starts suspended and must be resumed from within a
+  // user gesture - Emscripten only attempts this from a timer, which iOS
+  // blocks. We grab SDL's context and resume it synchronously in the gesture.
+  var audioUnlocked = false;
+  function unlockSDL2Audio() {
+    if (audioUnlocked) return;
+    try {
+      var S = Module.SDL2;
+      if (S && S.audioContext && S.audioContext.state === 'suspended') {
+        var p = S.audioContext.resume();
+        if (p && p.then) p.then(function () {}, function () {});
+      }
+    } catch (e) {}
+  }
+
   function startGame() {
     if (started) return;
     started = true;
     overlay.classList.add('hidden');
     controller.classList.add('active');
-    // Resume any suspended AudioContext (browsers may create it suspended
-    // even inside a user gesture on some platforms).
-    try {
-      if (typeof AudioContext !== 'undefined') {
-        var ctx = new AudioContext();
-        if (ctx.state === 'suspended') ctx.resume();
-      }
-    } catch(e) {}
     // The engine's main() drives its own requestAnimationFrame loop.
     try { Module.callMain([]); } catch (e) { console.error(e); }
+    // Resume SDL's AudioContext inside this tap/click gesture.
+    unlockSDL2Audio();
     try { document.getElementById('canvas').focus(); } catch (e) {}
   }
 
   startBtn.addEventListener('click', function (ev) {
     if (!startBtn.classList.contains('disabled')) startGame();
   });
+  // Belt and braces: resume SDL audio on the first real key/touch/pointer
+  // event too (covers browsers that init the context after the start tap).
   window.addEventListener('keydown', function (ev) {
     if (!started && !startBtn.classList.contains('disabled')) startGame();
+    unlockSDL2Audio();
   });
+  document.addEventListener('pointerdown', function () { unlockSDL2Audio(); }, { once: true });
+  document.addEventListener('touchstart', function () { unlockSDL2Audio(); }, { once: true });
   // fallback if the data package never reports complete (already loaded)
   setTimeout(function () { if (startBtn.classList.contains('disabled')) { statusEl.textContent = ''; startBtn.classList.remove('disabled'); } }, 8000);
 </script>
