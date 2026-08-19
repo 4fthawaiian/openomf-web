@@ -3,7 +3,7 @@ deps-src/
 data/
 output/
 web/
-openomf/.git/
+
 *.log
 __pycache__/
 .DS_Store

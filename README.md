@@ -118,12 +118,14 @@ wasm-omf/
 ├── prepare-data.sh       # downloads freeware assets
 ├── serve.sh              # dev server
 ├── .gitignore
+├── patches/
+│   └── omf-web-overrides.patch   # the 21-file WebGL2 override patch
 ├── docker/
 │   ├── build-wasm.sh     # container build script
 │   └── run-build.sh      # docker wrapper
 ├── shell/
 │   └── shell.html        # HTML shell + touch controller
-├── openomf/              # patched OpenOMF source
+├── openomf/              # git subtree of omf2097/openomf + overrides
 │   ├── src/
 │   ├── shaders/          # GLSL ES 3.00 shaders
 │   ├── cmake-scripts/
@@ -132,7 +134,8 @@ wasm-omf/
 ├── data/                 # assembled game data (not in repo)
 ├── deps-src/             # downloaded dep tarballs (not in repo)
 ├── build/                # Docker build scratch (not in repo)
-└── output/               # final web artifacts (not in repo)
+├── output/               # final web artifacts (not in repo)
+└── web/                  # served copy of the artifacts
 ```
 
 ## Credits
