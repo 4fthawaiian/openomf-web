@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>OpenOMF 2097 (Web)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    overscroll-behavior: none;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+  #canvas {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    image-rendering: pixelated;
+    touch-action: none;
+    background: #000;
+  }
+
+  /* ---------- loading / start overlay ---------- */
+  #startoverlay {
+    position: fixed; inset: 0; z-index: 30;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: radial-gradient(circle at 50% 40%, #141b2e 0%, #000 70%);
+    color: #cfe3ff; text-align: center;
+    transition: opacity .4s;
+  }
+  #startoverlay.hidden { opacity: 0; pointer-events: none; }
+  #startoverlay h1 {
+    margin: 0 0 4px; font-size: clamp(22px, 6vw, 44px);
+    letter-spacing: 2px; text-shadow: 0 0 18px rgba(80,160,255,.6);
+  }
+  #startoverlay p { margin: 4px 20px; color: #8fb3e0; line-height: 1.5; font-size: clamp(12px, 3vw, 16px); }
+  #status { min-height: 1.2em; margin-top: 8px; color: #5f7aa8; font-size: clamp(11px, 2.6vw, 14px); }
+  #startbtn {
+    margin-top: 22px; padding: 14px 42px;
+    border: 1px solid #3d6fb0; border-radius: 12px;
+    background: linear-gradient(#1b2a48, #0f1a30);
+    color: #cfe3ff; font-size: clamp(15px, 4vw, 20px); letter-spacing: 3px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  #startbtn.disabled { opacity: .45; cursor: wait; }
+
+  /* ---------- virtual controller ---------- */
+  #controller {
+    position: fixed; inset: 0; z-index: 20;
+    pointer-events: none;
+    display: none;
+  }
+  #controller.active { display: block; }
+
+  #joyzone {
+    position: absolute; left: 0; bottom: 0;
+    width: 45vw; height: 70vh; max-width: 340px; max-height: 480px;
+    pointer-events: auto;
+    touch-action: none;
+  }
+  #joybase, #joytip {
+    position: absolute;
+    border: 2px solid rgba(160,200,255,.35);
+    background: rgba(10,20,40,.25);
+    border-radius: 50%;
+    box-sizing: border-box;
+  }
+  #joybase { width: 130px; height: 130px; left: 40px; bottom: 40px; }
+  #joytip {
+    width: 52px; height: 52px; left: 79px; bottom: 79px;
+    background: rgba(160,200,255,.22);
+    border-color: rgba(160,200,255,.55);
+    transition: none;
+    display: none;
+  }
+
+  .pad {
+    position: absolute;
+    pointer-events: auto;
+    touch-action: none;
+    border: 2px solid rgba(160,200,255,.35);
+    background: rgba(10,20,40,.25);
+    color: #cfe3ff;
+    border-radius: 12px;
+    font-weight: 700;
+    text-align: center;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(12px, 3.4vw, 17px);
+    letter-spacing: 1px;
+    user-select: none; -webkit-user-select: none;
+    box-shadow: 0 2px 10px rgba(0,0,0,.5);
+  }
+  .pad.pressed { background: rgba(70,150,255,.45); border-color: rgba(200,220,255,.8); }
+  .pad.small { border-radius: 50%; width: 46px; height: 46px; font-size: clamp(10px, 2.6vw, 13px); }
+
+  #btnkick  { right: 6vw;  bottom: 16vh; width: 84px; height: 84px; border-radius: 50%; }
+  #btnpunch { right: 20vw; bottom: 6vh;  width: 96px; height: 96px; border-radius: 50%; }
+  #btnjump  { right: 2vw;  bottom: 34vh; width: 64px; height: 64px; border-radius: 50%; }
+  #btnmenu  { right: 2vw;  top: 2vh; }
+
+  .hint {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 4px;
+    color: rgba(160,200,255,.5); font-size: 10px; letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+<!-- Virtual touch controller -->
+<div id="controller">
+  <div id="joyzone">
+    <div id="joybase"></div>
+    <div id="joytip"></div>
+  </div>
+  <div class="pad" id="btnkick">KICK</div>
+  <div class="pad" id="btnpunch">PUNCH</div>
+  <div class="pad" id="btnjump">JUMP</div>
+  <div class="pad small" id="btnmenu">ESC</div>
+</div>
+
+<!-- Loading / start screen -->
+<div id="startoverlay">
+  <h1>OPEN OMF&quot;2097&quot;</h1>
+  <p>Freeware remake running in your browser.<br>Touch: left stick to move &bull; KICK &bull; PUNCH &bull; JUMP &bull; ESC for menu.</p>
+  <div id="status">Downloading...</div>
+  <button id="startbtn" class="disabled">TAP TO START</button>
+</div>
+
+<script type="text/javascript">
+  'use strict';
+
+  var statusEl = document.getElementById('status');
+  var startBtn = document.getElementById('startbtn');
+  var overlay = document.getElementById('startoverlay');
+  var controller = document.getElementById('controller');
+
+  var Module = {
+    canvas: document.getElementById('canvas'),
+    print: function () { console.log.apply(console, arguments); },
+    printErr: function () { console.error.apply(console, arguments); },
+    setStatus: function (text) {
+      statusEl.textContent = text || '';
+    },
+    monitorRunDependencies: function (left) {
+      if (left === 0) {
+        statusEl.textContent = 'Ready.';
+        startBtn.classList.remove('disabled');
+      }
+    },
+    preRun: [
+      function () {
+        // Set environment variables the engine reads via getenv().
+        // Module.ENV is not reliably merged in all Emscripten versions, so
+        // set them directly on the global ENV object in preRun.
+        if (typeof ENV !== 'undefined') {
+          ENV.OPENOMF_RESOURCE_PATH = '/data';
+          ENV.OPENOMF_CONFIG_PATH    = '/configdir';
+          ENV.OPENOMF_STATE_PATH     = '/statedir';
+        }
+        // Create the writable layout dirs the engine expects. /data is the
+        // preloaded (read-only) resource mount.
+        if (typeof FS !== 'undefined') {
+          var dirs = ['/data/mods', '/configdir', '/statedir'];
+          for (var i = 0; i < dirs.length; i++) {
+            try { FS.mkdir(dirs[i]); } catch (e) { /* already exists */ }
+          }
+        }
+      }
+    ],
+    noInitialRun: true
+  };
+
+  /* ------------------------------------------------------------------ *
+   * Virtual keyboard input. The engine reads SDL keyboard state, and    *
+   * Emscripten's SDL turns real DOM key events into SDL events. We      *
+   * synthesize the same DOM events so the on-screen controller works    *
+   * without any changes to the game's own input handling.               *
+   * ------------------------------------------------------------------ */
+  var KEYMAP = {
+    'ArrowUp':    { key: 'ArrowUp',    code: 'ArrowUp',    keyCode: 38 },
+    'ArrowDown':  { key: 'ArrowDown',  code: 'ArrowDown',  keyCode: 40 },
+    'ArrowLeft':  { key: 'ArrowLeft',  code: 'ArrowLeft',  keyCode: 37 },
+    'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
+    'Enter':      { key: 'Enter',      code: 'Enter',      keyCode: 13 },
+    'ShiftRight': { key: 'Shift',      code: 'ShiftRight', keyCode: 16 },
+    'Escape':     { key: 'Escape',     code: 'Escape',     keyCode: 27 }
+  };
+  var heldKeys = Object.create(null);
+
+  function sendKey(name, down) {
+    if (down === heldKeys[name]) return;
+    var spec = KEYMAP[name];
+    if (!spec) return;
+    heldKeys[name] = down;
+    window.dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', {
+      key: spec.key, code: spec.code, keyCode: spec.keyCode, which: spec.keyCode,
+      bubbles: true, cancelable: true
+    }));
+  }
+
+  /* ---------------------------- joystick ---------------------------- */
+  var joyzone = document.getElementById('joyzone');
+  var joytip = document.getElementById('joytip');
+  var activeStick = null;     // { id, ox, oy, keys: [] }
+
+  function stickKeys(dx, dy) {
+    var dead = 14;
+    var want = [];
+    if (Math.abs(dx) >= dead) want.push(dx > 0 ? 'ArrowRight' : 'ArrowLeft');
+    if (Math.abs(dy) >= dead) want.push(dy > 0 ? 'ArrowDown' : 'ArrowUp');
+    return want;
+  }
+
+  function applyStick(id, x, y) {
+    var st = activeStick;
+    if (!st || st.id !== id) return;
+    var dx = x - st.ox, dy = y - st.oy;
+    var want = stickKeys(dx, dy);
+    // release keys no longer wanted
+    for (var i = 0; i < st.keys.length; i++) {
+      if (want.indexOf(st.keys[i]) === -1) sendKey(st.keys[i], false);
+    }
+    // press newly wanted keys
+    for (var j = 0; j < want.length; j++) {
+      if (st.keys.indexOf(want[j]) === -1) sendKey(want[j], true);
+    }
+    st.keys = want;
+    // draw the stick tip clamped to the base
+    var len = Math.sqrt(dx * dx + dy * dy);
+    var max = 46;
+    var cx = len > max ? dx / len * max : dx;
+    var cy = len > max ? dy / len * max : dy;
+    joytip.style.display = 'block';
+    joytip.style.transform = 'translate(' + cx + 'px,' + cy + 'px)';
+  }
+
+  function releaseStick(id) {
+    var st = activeStick;
+    if (!st || st.id !== id) return;
+    for (var i = 0; i < st.keys.length; i++) sendKey(st.keys[i], false);
+    st.keys = [];
+    activeStick = null;
+    joytip.style.display = 'none';
+  }
+
+  joyzone.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();
+    if (activeStick) releaseStick(activeStick.id);
+    joyzone.setPointerCapture(ev.pointerId);
+    activeStick = { id: ev.pointerId, ox: ev.clientX, oy: ev.clientY, keys: [] };
+  });
+  joyzone.addEventListener('pointermove', function (ev) {
+    if (activeStick) applyStick(activeStick.id, ev.clientX, ev.clientY);
+  });
+  joyzone.addEventListener('pointerup', function (ev) { ev.preventDefault(); releaseStick(ev.pointerId); });
+  joyzone.addEventListener('pointercancel', function (ev) { releaseStick(ev.pointerId); });
+
+  /* ----------------------------- buttons ---------------------------- */
+  function bindButton(el, key) {
+    function press(ev) { ev.preventDefault(); el.classList.add('pressed'); sendKey(key, true); }
+    function release(ev) { el.classList.remove('pressed'); sendKey(key, false); }
+    el.addEventListener('pointerdown', press);
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+    el.addEventListener('pointerleave', release);
+  }
+  bindButton(document.getElementById('btnkick'),  'ShiftRight'); // KICK
+  bindButton(document.getElementById('btnpunch'), 'Enter');      // PUNCH
+  bindButton(document.getElementById('btnjump'),  'ArrowUp');    // JUMP
+  bindButton(document.getElementById('btnmenu'),  'Escape');     // menu / cancel
+
+  /* ------------------------------ start ---------------------------- */
+  var started = false;
+  function startGame() {
+    if (started) return;
+    started = true;
+    overlay.classList.add('hidden');
+    controller.classList.add('active');
+    // Resume any suspended AudioContext (browsers may create it suspended
+    // even inside a user gesture on some platforms).
+    try {
+      if (typeof AudioContext !== 'undefined') {
+        var ctx = new AudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+      }
+    } catch(e) {}
+    // The engine's main() drives its own requestAnimationFrame loop.
+    try { Module.callMain([]); } catch (e) { console.error(e); }
+    try { document.getElementById('canvas').focus(); } catch (e) {}
+  }
+
+  startBtn.addEventListener('click', function (ev) {
+    if (!startBtn.classList.contains('disabled')) startGame();
+  });
+  window.addEventListener('keydown', function (ev) {
+    if (!started && !startBtn.classList.contains('disabled')) startGame();
+  });
+  // fallback if the data package never reports complete (already loaded)
+  setTimeout(function () { if (startBtn.classList.contains('disabled')) { statusEl.textContent = ''; startBtn.classList.remove('disabled'); } }, 8000);
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

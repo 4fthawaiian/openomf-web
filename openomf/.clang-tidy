@@ -1,0 +1,11 @@
+---
+Checks: >
+  -*,
+  google-readability-braces-around-statements,
+WarningsAsErrors: '*'
+HeaderFilterRegex: ''
+FormatStyle: llvm
+CheckOptions:
+  - key:             google-readability-braces-around-statements.ShortStatementLines
+    value:           '1'
+...

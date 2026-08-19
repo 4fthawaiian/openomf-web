@@ -1,0 +1,806 @@
+#include <stdio.h>
+
+#include "formats/pilot.h"
+#include "game/gui/label.h"
+#include "game/gui/spritebutton.h"
+#include "game/gui/trn_menu.h"
+#include "game/scenes/mechlab.h"
+#include "game/scenes/mechlab/button_details.h"
+#include "game/scenes/mechlab/har_economy.h"
+#include "game/scenes/mechlab/lab_menu_customize.h"
+#include "game/scenes/mechlab/lab_menu_trade.h"
+#include "game/utils/formatting.h"
+#include "resources/bk.h"
+#include "resources/languages.h"
+#include "utils/c_array_util.h"
+#include "utils/c_string_util.h"
+#include "utils/log.h"
+
+static component *header_label;
+static component *details_label;
+
+static void lab_menu_focus_arm_power(component *c, bool focused, void *userdata);
+static void lab_menu_focus_arm_speed(component *c, bool focused, void *userdata);
+static void lab_menu_focus_leg_power(component *c, bool focused, void *userdata);
+static void lab_menu_focus_leg_speed(component *c, bool focused, void *userdata);
+static void lab_menu_focus_armor(component *c, bool focused, void *userdata);
+static void lab_menu_focus_stun_resistance(component *c, bool focused, void *userdata);
+
+int calculate_trade_value(sd_pilot *pilot) {
+    int trade_value = har_prices[pilot->har_id];
+    for(int i = 1; i < pilot->arm_power; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * arm_leg_multiplier;
+    }
+
+    for(int i = 1; i < pilot->leg_power; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * arm_leg_multiplier;
+    }
+
+    for(int i = 1; i < pilot->arm_speed; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * arm_leg_multiplier;
+    }
+
+    for(int i = 1; i < pilot->leg_speed; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * arm_leg_multiplier;
+    }
+
+    for(int i = 1; i < pilot->armor; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * armor_multiplier;
+    }
+
+    for(int i = 1; i < pilot->stun_resistance; i++) {
+        trade_value += har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[i] * stun_res_multiplier;
+    }
+
+    return trade_value * 0.85;
+}
+
+int har_price(int har_id) {
+    return har_prices[har_id];
+}
+
+void lab_menu_customize_done(component *c, void *userdata) {
+    trnmenu_finish(c->parent);
+}
+
+void lab_menu_customize_color_main(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot_set_player_color(&p1->chr->pilot, PRIMARY, (p1->chr->pilot.color_1 + 1) % 17);
+    mechlab_update(s);
+}
+
+void lab_menu_customize_color_secondary(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot_set_player_color(&p1->chr->pilot, SECONDARY, (p1->chr->pilot.color_2 + 1) % 17);
+    mechlab_update(s);
+}
+
+void lab_menu_customize_color_third(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot_set_player_color(&p1->chr->pilot, TERTIARY, (p1->chr->pilot.color_3 + 1) % 17);
+    mechlab_update(s);
+}
+
+void lab_menu_customize_arm_power(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power] * arm_leg_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->arm_power--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power + 1] * arm_leg_multiplier;
+        pilot->money -= price;
+        pilot->arm_power++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_arm_power(c, true, userdata);
+}
+
+void lab_menu_customize_check_arm_power_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power] * arm_leg_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power + 1] * arm_leg_multiplier;
+        component_disable(c, price > pilot->money || pilot->arm_power + 1 > max_arm_power[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_leg_power(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power] * arm_leg_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->leg_power--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power + 1] * arm_leg_multiplier;
+        pilot->money -= price;
+        pilot->leg_power++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_leg_power(c, true, userdata);
+}
+
+void lab_menu_customize_check_leg_power_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power] * arm_leg_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power + 1] * arm_leg_multiplier;
+        component_disable(c, price > pilot->money || pilot->leg_power + 1 > max_leg_power[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_arm_speed(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed] * arm_leg_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->arm_speed--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed + 1] * arm_leg_multiplier;
+        pilot->money -= price;
+        pilot->arm_speed++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_arm_speed(c, true, userdata);
+}
+
+void lab_menu_customize_check_arm_speed_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed] * arm_leg_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed + 1] * arm_leg_multiplier;
+        component_disable(c, price > pilot->money || pilot->arm_speed + 1 > max_arm_speed[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_leg_speed(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed] * arm_leg_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->leg_speed--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed + 1] * arm_leg_multiplier;
+        pilot->money -= price;
+        pilot->leg_speed++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_leg_speed(c, true, userdata);
+}
+
+void lab_menu_customize_check_leg_speed_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed] * arm_leg_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed + 1] * arm_leg_multiplier;
+        component_disable(c, price > pilot->money || pilot->leg_speed + 1 > max_leg_speed[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_armor(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor] * armor_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->armor--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor + 1] * armor_multiplier;
+        pilot->money -= price;
+        pilot->armor++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_armor(c, true, userdata);
+}
+
+void lab_menu_customize_check_armor_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor] * armor_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor + 1] * armor_multiplier;
+        component_disable(c, price > pilot->money || pilot->armor + 1 > max_armor[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_stun_resistance(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance] * stun_res_multiplier;
+        if(price > 0) {
+            pilot->money += price * 0.85;
+            pilot->stun_resistance--;
+            mechlab_update(s);
+        }
+    } else {
+        int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance + 1] *
+                        stun_res_multiplier;
+        pilot->money -= price;
+        pilot->stun_resistance++;
+        mechlab_update(s);
+    }
+    lab_menu_focus_stun_resistance(c, true, userdata);
+}
+
+void lab_menu_customize_check_stun_resistance_price(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    sd_pilot *pilot = game_player_get_pilot(p1);
+    if(mechlab_get_selling(s)) {
+        int32_t price =
+            har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance] * stun_res_multiplier;
+        component_disable(c, price < 1);
+    } else {
+        int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance + 1] *
+                        stun_res_multiplier;
+        component_disable(c, price > pilot->money || pilot->stun_resistance + 1 > max_stun_res[pilot->har_id]);
+    }
+}
+
+void lab_menu_customize_trade(component *c, void *userdata) {
+    scene *s = userdata;
+    trnmenu_set_submenu(c->parent, lab_menu_trade_create(s));
+}
+
+void lab_menu_customize_check_trade_robot(component *c, void *userdata) {
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+
+    int trade_value = calculate_trade_value(p1->pilot);
+    bool trades = false;
+    for(int i = 0; i < 11; i++) {
+        if(i == p1->pilot->har_id) {
+            // don't trade for the current HAR
+            continue;
+        }
+        if((p1->pilot->har_trades >> i) & 1 && har_prices[i] < trade_value + p1->pilot->money) {
+            trades = true;
+        }
+    }
+    component_disable(c, !trades);
+}
+
+// clang-format off
+static const button_details details_list[] = {
+    {lab_menu_customize_color_main,      NULL,          TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {0, 0, 0, 0}, false}, // Blue
+    {lab_menu_customize_color_third,     NULL,          TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {0, 0, 0, 0}, false}, // Yellow
+    {lab_menu_customize_color_secondary, NULL,          TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {0, 0, 0, 0}, false}, // Red
+    {lab_menu_customize_arm_power,       "ARM POWER",   TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+    {lab_menu_customize_leg_power,       "LEG POWER",   TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+    {lab_menu_customize_arm_speed,       "ARM SPEED",   TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+    {lab_menu_customize_leg_speed,       "LEG SPEED",   TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+    {lab_menu_customize_armor,           "ARMOR",       TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+    {lab_menu_customize_stun_resistance, "STUN RES.",   TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {0, 0, 0, 0}, false},
+    {lab_menu_customize_trade,           "TRADE ROBOT", TEXT_ROW_HORIZONTAL, TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {0, 0, 0, 0}, false},
+    {lab_menu_customize_done,           "DONE",        TEXT_ROW_VERTICAL,   TEXT_ALIGN_CENTER, TEXT_ALIGN_MIDDLE, {1, 0, 0, 0}, false},
+};
+// clang-format on
+
+static const spritebutton_tick_cb tickers[] = {NULL,
+                                               NULL,
+                                               NULL,
+                                               lab_menu_customize_check_arm_power_price,
+                                               lab_menu_customize_check_leg_power_price,
+                                               lab_menu_customize_check_arm_speed_price,
+                                               lab_menu_customize_check_leg_speed_price,
+                                               lab_menu_customize_check_armor_price,
+                                               lab_menu_customize_check_stun_resistance_price,
+                                               lab_menu_customize_check_trade_robot,
+                                               NULL};
+
+void lab_menu_focus_blue(component *c, bool focused, void *userdata) {
+    scene *s = userdata;
+    if(focused) {
+        if(mechlab_get_selling(s)) {
+            mechlab_set_hint(s, lang_get(547));
+        } else {
+            mechlab_set_hint(s, lang_get(548));
+        }
+        label_set_text(header_label, "");
+        label_set_text(details_label, "");
+    }
+    mechlab_spin_har(s, !focused);
+}
+
+void lab_menu_focus_yellow(component *c, bool focused, void *userdata) {
+    scene *s = userdata;
+    if(focused) {
+        if(mechlab_get_selling(s)) {
+            mechlab_set_hint(s, lang_get(551));
+        } else {
+            mechlab_set_hint(s, lang_get(552));
+        }
+        label_set_text(header_label, "");
+        label_set_text(details_label, "");
+    }
+    mechlab_spin_har(s, !focused);
+}
+
+void lab_menu_focus_red(component *c, bool focused, void *userdata) {
+    scene *s = userdata;
+    if(focused) {
+        if(mechlab_get_selling(s)) {
+            mechlab_set_hint(s, lang_get(549));
+        } else {
+            mechlab_set_hint(s, lang_get(550));
+        }
+        label_set_text(header_label, "");
+        label_set_text(details_label, "");
+    }
+    mechlab_spin_har(s, !focused);
+}
+
+static void lab_menu_focus_arm_power(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "ARM POWER:\n\nSALES PRICE:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power] * arm_leg_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->arm_power, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(553), "arm");
+            mechlab_set_hint(s, tmp);
+        } else {
+            label_set_text(header_label, "ARM POWER:\n\nUPGRADE COST:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power + 1] * arm_leg_multiplier;
+            if(pilot->arm_power >= max_arm_power[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->arm_power + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(554), "arm");
+            mechlab_set_hint(s, tmp);
+        }
+    }
+}
+
+static void lab_menu_focus_leg_power(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "LEG POWER:\n\nSALES PRICE:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power] * arm_leg_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->leg_power, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(555), "leg");
+            mechlab_set_hint(s, tmp);
+        } else {
+            label_set_text(header_label, "LEG POWER:\n\nUPGRADE COST:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power + 1] * arm_leg_multiplier;
+            if(pilot->leg_power >= max_leg_power[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->leg_power + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(556), "leg");
+            mechlab_set_hint(s, tmp);
+        }
+    }
+}
+
+static void lab_menu_focus_arm_speed(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "ARM SPEED:\n\nSALES PRICE:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed] * arm_leg_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->arm_speed, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(557), "arm");
+            mechlab_set_hint(s, tmp);
+        } else {
+            label_set_text(header_label, "ARM SPEED:\n\nUPGRADE COST:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed + 1] * arm_leg_multiplier;
+            if(pilot->arm_speed >= max_arm_speed[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->arm_speed + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(558), "arm");
+            mechlab_set_hint(s, tmp);
+        }
+    }
+}
+
+static void lab_menu_focus_leg_speed(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "LEG SPEED:\n\nSALES PRICE:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed] * arm_leg_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->leg_speed, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(559), "leg");
+            mechlab_set_hint(s, tmp);
+        } else {
+            label_set_text(header_label, "LEG SPEED:\n\nUPGRADE COST:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed + 1] * arm_leg_multiplier;
+            if(pilot->leg_speed >= max_leg_speed[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->leg_speed + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            unsafe_snprintf(tmp, sizeof(tmp), lang_get(560), "leg");
+            mechlab_set_hint(s, tmp);
+        }
+    }
+}
+
+static void lab_menu_focus_armor(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "ARMOR PLATE:\n\nSALES PRICE:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor] * armor_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->armor, price_str);
+                label_set_text(details_label, tmp);
+            }
+            mechlab_set_hint(s, lang_get(561));
+        } else {
+            label_set_text(header_label, "ARMOR PLATE:\n\nUPGRADE COST:");
+            int32_t price =
+                har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor + 1] * armor_multiplier;
+            if(pilot->armor >= max_armor[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->armor + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            mechlab_set_hint(s, lang_get(562));
+        }
+    }
+}
+
+static void lab_menu_focus_stun_resistance(component *c, bool focused, void *userdata) {
+    char tmp[200];
+    char price_str[32];
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        sd_pilot *pilot = game_player_get_pilot(p1);
+        if(mechlab_get_selling(s)) {
+            label_set_text(header_label, "STUN RES.:\n\nSALES PRICE:");
+            int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance] *
+                            stun_res_multiplier;
+            if(price < 1) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format((int)(price * 0.85), price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->stun_resistance, price_str);
+                label_set_text(details_label, tmp);
+            }
+            mechlab_set_hint(s, lang_get(563));
+        } else {
+            label_set_text(header_label, "STUN RES.:\n\nUPGRADE COST:");
+            int32_t price = har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance + 1] *
+                            stun_res_multiplier;
+            if(pilot->stun_resistance >= max_stun_res[pilot->har_id]) {
+                label_set_text(details_label, "Unavailable\n\nUnavailable");
+            } else {
+                score_format(price, price_str, sizeof(price_str));
+                snprintf(tmp, sizeof(tmp), "Level %d\n\n$ %sK", pilot->stun_resistance + 1, price_str);
+                label_set_text(details_label, tmp);
+            }
+            mechlab_set_hint(s, lang_get(564));
+        }
+    }
+}
+
+void lab_menu_focus_trade(component *c, bool focused, void *userdata) {
+    if(focused) {
+        scene *s = userdata;
+        game_player *p1 = game_state_get_player(s->gs, 0);
+        mechlab_set_hint(s, lang_get(565));
+        int trade_value = calculate_trade_value(p1->pilot);
+        uint8_t trades[5];
+        memset(trades, 0, sizeof(trades));
+        uint8_t tradecount = 0;
+        for(int i = 0; i < 11; i++) {
+            if(i == p1->pilot->har_id) {
+                // don't trade for the current HAR
+                continue;
+            }
+            if((p1->pilot->har_trades >> i) & 1 && har_prices[i] < trade_value + p1->pilot->money) {
+                trades[tradecount] = i;
+                tradecount++;
+            }
+        }
+        log_debug("got %d trades from the bitmask %u", tradecount, p1->pilot->har_trades);
+        // check if there's anything for trade
+        if(tradecount == 0) {
+            label_set_text(header_label, lang_get(488));
+            label_set_text(details_label, "");
+        } else {
+            label_set_text(header_label, lang_get(461));
+            char tmp[200] = "";
+            // pick 5 of however many we got
+            // naturally, I unrolled this loop for performance
+            if(tradecount == 1) {
+                snprintf(tmp, 200, "%s", lang_get(31 + trades[0]));
+            } else if(tradecount == 2) {
+                snprintf(tmp, 200, "%s\n%s", lang_get(31 + trades[0]), lang_get(31 + trades[1]));
+            } else if(tradecount == 3) {
+                snprintf(tmp, 200, "%s\n%s\n%s", lang_get(31 + trades[0]), lang_get(31 + trades[1]),
+                         lang_get(31 + trades[2]));
+            } else if(tradecount == 4) {
+                snprintf(tmp, 200, "%s\n%s\n%s\n%s", lang_get(31 + trades[0]), lang_get(31 + trades[1]),
+                         lang_get(31 + trades[2]), lang_get(31 + trades[3]));
+            } else if(tradecount == 5) {
+                snprintf(tmp, 200, "%s\n%s\n%s\n%s\n%s", lang_get(31 + trades[0]), lang_get(31 + trades[1]),
+                         lang_get(31 + trades[2]), lang_get(31 + trades[3]), lang_get(31 + trades[4]));
+            }
+            label_set_text(details_label, tmp);
+        }
+    }
+}
+
+void lab_menu_focus_done(component *c, bool focused, void *userdata) {
+    if(focused) {
+        scene *s = userdata;
+        if(mechlab_get_selling(s)) {
+            mechlab_set_hint(s, lang_get(567));
+        } else {
+            mechlab_set_hint(s, lang_get(568));
+        }
+        label_set_text(header_label, "");
+        label_set_text(details_label, "");
+    }
+}
+
+static const spritebutton_focus_cb focus_cbs[] = {
+    lab_menu_focus_blue,      lab_menu_focus_yellow,    lab_menu_focus_red,
+    lab_menu_focus_arm_power, lab_menu_focus_leg_power, lab_menu_focus_arm_speed,
+    lab_menu_focus_leg_speed, lab_menu_focus_armor,     lab_menu_focus_stun_resistance,
+    lab_menu_focus_trade,     lab_menu_focus_done,
+};
+
+static void lab_menu_har_picture_tick(component *current_picture, void *userdata) {
+    if(trnmenu_is_fading(current_picture->parent)) {
+        return;
+    }
+    scene *s = userdata;
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    animation *correct_picture = &bk_get_info(s->bk_data, 5)->ani;
+    const sprite *correct_sprite = animation_get_sprite(correct_picture, p1->pilot->har_id);
+    if(spritebutton_get_img(current_picture)->guid != correct_sprite->data->guid) {
+        spritebutton_set_img(current_picture, correct_sprite->data);
+        component_set_pos_hints(current_picture, correct_sprite->pos.x, correct_sprite->pos.y);
+    }
+}
+
+component *lab_menu_customize_create(scene *s) {
+    animation *main_sheets = &bk_get_info(s->bk_data, 1)->ani;
+    animation *main_buttons = &bk_get_info(s->bk_data, 3)->ani;
+    animation *hand_of_doom = &bk_get_info(s->bk_data, 29)->ani;
+    animation *har_picture = &bk_get_info(s->bk_data, 5)->ani;
+
+    // Initialize menu, and set button sheet
+    sprite *msprite = animation_get_sprite(main_sheets, 0);
+    component *menu = trnmenu_create(msprite->data, msprite->pos.x, msprite->pos.y, false);
+
+    // Init GUI buttons with locations from the "select" button sprites
+    for(int i = 0; i < animation_get_sprite_count(main_buttons); i++) {
+        sprite *button_sprite = animation_get_sprite(main_buttons, i);
+        component *button = sprite_button_from_details(&details_list[i], NULL, button_sprite->data, s);
+        spritebutton_set_font(button, FONT_SMALL);
+        spritebutton_set_text_color(button, TEXT_TRN_BLUE);
+        component_set_pos_hints(button, button_sprite->pos.x, button_sprite->pos.y);
+        spritebutton_set_tick_cb(button, tickers[i]);
+        spritebutton_set_focus_cb(button, focus_cbs[i]);
+        component_tick(button);
+        trnmenu_attach(menu, button);
+    }
+
+    game_player *p1 = game_state_get_player(s->gs, 0);
+    const sprite *bsprite = animation_get_sprite(har_picture, p1->pilot->har_id);
+    component *button = spritebutton_create(NULL, bsprite->data, false, NULL, s);
+    component_set_pos_hints(button, bsprite->pos.x, bsprite->pos.y);
+    button->supports_select = false;
+    spritebutton_set_always_display(button);
+    spritebutton_set_tick_cb(button, lab_menu_har_picture_tick);
+    trnmenu_attach(menu, button);
+
+    header_label = label_create("");
+    label_set_text_letter_spacing(header_label, 2);
+    label_set_text_color(header_label, 0xA5);
+    label_set_font(header_label, FONT_SMALL);
+    component_set_size_hints(header_label, 90, 80);
+    component_set_pos_hints(header_label, 210, 150);
+    trnmenu_attach(menu, header_label);
+
+    details_label = label_create("");
+    label_set_text_letter_spacing(details_label, 2);
+    label_set_text_color(details_label, 0xA7);
+    label_set_font(details_label, FONT_SMALL);
+    component_set_size_hints(details_label, 90, 80);
+    component_set_pos_hints(details_label, 210, 158);
+    trnmenu_attach(menu, details_label);
+
+    // Bind hand animation
+    trnmenu_bind_hand(menu, hand_of_doom, s->gs);
+
+    return menu;
+}
+
+int sell_highest_value_upgrade(sd_pilot *pilot, char *sold) {
+    int32_t prices[] = {
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_power] * arm_leg_multiplier,
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->arm_speed] * arm_leg_multiplier,
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_power] * arm_leg_multiplier,
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->leg_speed] * arm_leg_multiplier,
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->stun_resistance] * stun_res_multiplier,
+        har_upgrade_price[pilot->har_id] * upgrade_level_multiplier[pilot->armor] * armor_multiplier,
+    };
+    int max_idx = -1;
+    int32_t max_price = 0;
+    for(unsigned i = 0; i < N_ELEMENTS(prices); ++i) {
+        if(prices[i] > max_price) {
+            max_price = prices[i];
+            max_idx = i;
+        }
+    }
+    switch(max_idx) {
+        case 0:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d ARM POWER", pilot->arm_power + 1);
+            pilot->arm_power--;
+            break;
+        case 1:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d ARM SPEED", pilot->arm_speed + 1);
+            pilot->arm_speed--;
+            break;
+        case 2:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d LEG POWER", pilot->leg_power + 1);
+            pilot->leg_power--;
+            break;
+        case 3:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d LEG SPEED", pilot->leg_speed + 1);
+            pilot->leg_speed--;
+            break;
+        case 4:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d STUN RES.", pilot->stun_resistance + 1);
+            pilot->stun_resistance--;
+            break;
+        case 5:
+            pilot->money += (int32_t)(prices[max_idx] * 0.85);
+            snprintf(sold, SOLD_BUF_SIZE, "LEVEL %d ARMOR PLATE", pilot->armor + 1);
+            pilot->armor--;
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}

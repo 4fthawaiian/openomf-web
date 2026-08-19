@@ -1,0 +1,24 @@
+SET(XMP_SEARCH_PATHS
+    /usr/local/
+    /usr
+    /opt
+)
+
+FIND_PATH(XMP_INCLUDE_DIR xmp.h
+    HINTS ${XMP_ROOT}
+    PATH_SUFFIXES include
+    PATHS ${XMP_SEARCH_PATHS}
+)
+FIND_LIBRARY(XMP_LIBRARY xmp xmp_dll
+    HINTS ${XMP_ROOT}
+    PATH_SUFFIXES lib64 lib
+    PATHS ${XMP_SEARCH_PATHS}
+)
+
+include(FindPackageHandleStandardArgs)
+# handle the QUIETLY and REQUIRED arguments
+FIND_PACKAGE_HANDLE_STANDARD_ARGS(xmp
+    REQUIRED_VARS XMP_LIBRARY XMP_INCLUDE_DIR
+)
+
+mark_as_advanced(XMP_INCLUDE_DIR XMP_LIBRARY XMP_SEARCH_PATHS)

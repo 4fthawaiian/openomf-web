@@ -1,0 +1,252 @@
+#include "utils/list.h"
+#include "utils/allocator.h"
+#include <stdlib.h>
+#include <string.h>
+
+void list_create(list *list) {
+    list->first = NULL;
+    list->last = NULL;
+    list->size = 0;
+    list->free_cb = NULL;
+}
+
+void list_create_cb(list *list, list_free_cb free_cb) {
+    list_create(list);
+    list->free_cb = free_cb;
+}
+
+void list_clear(list *list) {
+    list_node *now = list->first;
+    while(now != NULL) {
+        list_node *next = now->next;
+        if(list->free_cb) {
+            list->free_cb(now->data);
+        }
+        omf_free(now->data);
+        omf_free(now);
+        now = next;
+    }
+    list->first = NULL;
+    list->last = NULL;
+    list->size = 0;
+}
+
+void list_free(list *list) {
+    list_clear(list);
+}
+
+void list_prepend(list *list, const void *ptr, size_t size) {
+    list_node *node = omf_calloc(1, sizeof(list_node));
+    node->next = list->first;
+    node->prev = NULL;
+    node->data = omf_calloc(size, 1);
+    memcpy(node->data, ptr, size);
+    if(list->first) {
+        list->first->prev = node;
+    }
+    if(!list->last) {
+        list->last = node;
+    }
+    list->first = node;
+    list->size++;
+}
+
+void list_append(list *list, const void *ptr, size_t size) {
+    list_node *node = omf_calloc(1, sizeof(list_node));
+    node->next = NULL;
+    node->prev = list->last;
+    node->data = omf_calloc(size, 1);
+    memcpy(node->data, ptr, size);
+    if(list->last) {
+        list->last->next = node;
+    }
+    if(!list->first) {
+        list->first = node;
+    }
+    list->last = node;
+    list->size++;
+}
+
+void list_delete(list *list, iterator *iter) {
+    list_node *node = (list_node *)iter->vnow;
+
+    // If iterator hasn't advanced yet, determine the starting point
+    // Forward iterators (list_iter_begin) have prev == NULL
+    // Reverse iterators (list_iter_end) have next == NULL
+    if(node == NULL) {
+        node = (iter->prev == NULL) ? list->first : list->last;
+        if(node == NULL) {
+            return;
+        }
+    }
+
+    // Unlink node from its neighbors
+    if(node->prev != NULL) {
+        node->prev->next = node->next;
+    }
+    if(node->next != NULL) {
+        node->next->prev = node->prev;
+    }
+
+    // Set list start and end pointers
+    if(node == list->first) {
+        list->first = node->next;
+    }
+    if(node == list->last) {
+        list->last = node->prev;
+    }
+
+    // Update iterator so the next iteration step steps into the correct element
+    // Forward: set to prev, so iter_next() advances to what was node->next
+    // Reverse: set to next, so iter_prev() advances to what was node->prev
+    if(iter->prev == NULL) {
+        iter->vnow = node->prev;
+    } else {
+        iter->vnow = node->next;
+    }
+
+    if(list->free_cb) {
+        list->free_cb(node->data);
+    }
+    omf_free(node->data);
+    omf_free(node);
+    list->size--;
+}
+
+void *list_iter_next(iterator *iter) {
+    if(iter->vnow == NULL) {
+        iter->vnow = ((list *)iter->data)->first;
+    } else {
+        iter->vnow = ((list_node *)iter->vnow)->next;
+    }
+    if(iter->vnow == NULL) {
+        iter->ended = 1;
+        return NULL;
+    }
+    return ((list_node *)iter->vnow)->data;
+}
+
+void *list_iter_prev(iterator *iter) {
+    if(iter->vnow == NULL) {
+        iter->vnow = ((list *)iter->data)->last;
+    } else {
+        iter->vnow = ((list_node *)iter->vnow)->prev;
+    }
+    if(iter->vnow == NULL) {
+        iter->ended = 1;
+        return NULL;
+    }
+    return ((list_node *)iter->vnow)->data;
+}
+
+void *list_iter_peek_next(iterator *iter) {
+    const list_node *now = (iter->vnow == NULL) ? ((list *)iter->data)->first : ((list_node *)iter->vnow)->next;
+    return now ? now->data : NULL;
+}
+
+void list_iter_append(iterator *iter, const void *ptr, size_t size) {
+    if(iter->vnow == NULL) {
+        list_prepend((list *)iter->data, ptr, size);
+    } else {
+        list_node *vnow = iter->vnow;
+        list_node *vnext = vnow->next;
+        if(vnext == NULL) {
+            list_append((list *)iter->data, ptr, size);
+        } else {
+            list_node *node = omf_calloc(1, sizeof(list_node));
+            list *l = (list *)iter->data;
+            node->data = omf_calloc(size, 1);
+            memcpy(node->data, ptr, size);
+            vnow->next = node;
+            node->prev = vnow;
+            vnext->prev = node;
+            node->next = vnext;
+            l->size++;
+        }
+    }
+}
+
+void *list_get(const list *list, unsigned int i) {
+    const unsigned int size = list_size(list);
+    if(i >= size) {
+        return NULL;
+    }
+
+    // Small optimization -- if index is closer to the end, iterate backwards.
+    iterator it;
+    void *data;
+    if(i < size / 2) {
+        list_iter_begin(list, &it);
+        unsigned int n = 0;
+        foreach(it, data) {
+            if(i == n) {
+                return data;
+            }
+            n++;
+        }
+    } else {
+        list_iter_end(list, &it);
+        unsigned int n = size - 1;
+        foreach_reverse(it, data) {
+            if(i == n) {
+                return data;
+            }
+            n--;
+        }
+    }
+    return NULL;
+}
+
+void list_iter_begin(const list *list, iterator *iter) {
+    iter->data = list;
+    iter->vnow = NULL;
+    iter->inow = 0;
+    iter->next = list_iter_next;
+    iter->peek = list_iter_peek_next;
+    iter->prev = NULL;
+    iter->ended = (list->first == NULL);
+}
+
+void list_iter_end(const list *list, iterator *iter) {
+    iter->data = list;
+    iter->vnow = NULL;
+    iter->inow = 0;
+    iter->next = NULL;
+    iter->peek = NULL;
+    iter->prev = list_iter_prev;
+    iter->ended = (list->first == NULL);
+}
+
+void *list_pop_front(list *list) {
+    list_node *node = list->first;
+    if(node == NULL) {
+        return NULL;
+    }
+    void *data = node->data;
+    list->first = node->next;
+    if(list->first != NULL) {
+        list->first->prev = NULL;
+    } else {
+        list->last = NULL;
+    }
+    omf_free(node);
+    list->size--;
+    return data;
+}
+
+void *list_pop_back(list *list) {
+    list_node *node = list->last;
+    if(node == NULL) {
+        return NULL;
+    }
+    void *data = node->data;
+    list->last = node->prev;
+    if(list->last != NULL) {
+        list->last->next = NULL;
+    } else {
+        list->first = NULL;
+    }
+    omf_free(node);
+    list->size--;
+    return data;
+}
