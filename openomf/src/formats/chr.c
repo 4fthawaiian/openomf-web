@@ -1,0 +1,341 @@
+#include <assert.h>
+#include <ctype.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "formats/chr.h"
+#include "formats/error.h"
+#include "formats/internal/memreader.h"
+#include "formats/internal/memwriter.h"
+#include "formats/internal/reader.h"
+#include "formats/internal/writer.h"
+#include "formats/pic.h"
+#include "formats/tournament.h"
+#include "game/scenes/mechlab/har_economy.h"
+#include "game/scenes/mechlab/lab_menu_customize.h"
+#include "resources/modmanager.h"
+#include "resources/resource_files.h"
+#include "resources/trnmanager.h"
+#include "utils/allocator.h"
+#include "utils/c_string_util.h"
+#include "utils/log.h"
+
+void sd_chr_create(sd_chr_file *chr) {
+    assert(chr != NULL);
+    memset(chr, 0, sizeof(sd_chr_file));
+    for(int i = 0; i < SD_CHR_CUTSCENE_TEXT_COUNT; i++) {
+        str_create(&chr->cutscene_text[i]);
+    }
+}
+
+void sd_chr_from_trn(sd_chr_file *chr, const sd_tournament_file *trn, const sd_pilot *pilot) {
+    int ranked = 0;
+    for(uint32_t i = 0; i < trn->enemy_count; i++) {
+        chr->enemies[i] = omf_calloc(1, sizeof(sd_chr_enemy));
+        sd_pilot_create(&chr->enemies[i]->pilot);
+        sd_pilot_clone(&chr->enemies[i]->pilot, trn->enemies[i]);
+        if(!trn->enemies[i]->secret) {
+            ranked++;
+            chr->enemies[i]->pilot.rank = ranked;
+            chr->enemies[i]->trn_index = i;
+        }
+    }
+    vga_palette_init(&chr->pal);
+    chr->pilot.enemies_inc_unranked = trn->enemy_count;
+    chr->pilot.enemies_ex_unranked = ranked;
+    chr->pilot.rank = ranked + 1;
+
+    int32_t pilot_total_value = calculate_trade_value(&chr->pilot) + chr->pilot.money + (har_prices[0] * 85) / 100;
+    float extra_value = (pilot_total_value - trn->assumed_initial_value) / 320;
+    int32_t extra = extra_value / 0.6f;
+    if(extra > 1500) {
+        extra = 1500;
+    } else if(extra < 0) {
+        extra = 0;
+    }
+    chr->pilot.trn_rank_money = (ranked + 10) * 0.5 + (extra / 15);
+
+    strncpy_or_abort(chr->pilot.trn_name, trn->filename, sizeof(chr->pilot.trn_name));
+    str_set(&chr->pilot.trn_desc, &trn->locales[0]->title);
+    strncpy_or_abort(chr->pilot.trn_image, trn->pic_file, sizeof(chr->pilot.trn_image));
+    chr->photo = omf_calloc(1, sizeof(sd_sprite));
+    sd_sprite_copy(chr->photo, pilot->photo);
+}
+
+int sd_chr_load(sd_chr_file *chr, const path *filename) {
+    assert(chr != NULL);
+    assert(filename != NULL);
+
+    sd_reader *r = sd_reader_open(filename);
+
+    if(!r) {
+        return SD_FILE_OPEN_ERROR;
+    }
+
+    // Read up pilot block and the unknown data
+    memreader *mr = memreader_open_from_reader(r, 448);
+    memreader_xor(mr, 0xAC);
+    sd_pilot_create(&chr->pilot);
+    sd_pilot_load_from_mem(mr, &chr->pilot);
+    memreader_close(mr);
+
+    sd_tournament_file trn;
+    sd_pic_file pic, players;
+    bool trn_loaded = false;
+
+    path image_path = get_resource_filename(chr->pilot.trn_image);
+    path_dossify_filename(&image_path);
+    log_debug("loading tournament image from %s", path_c(&image_path));
+    sd_pic_create(&pic);
+    if(sd_pic_load(&pic, &image_path) != SD_SUCCESS) {
+        log_error("failed to load tournament image from %s", path_c(&image_path));
+    }
+
+    if(*chr->pilot.trn_name != '\0') {
+        trn_loaded = trn_load(&trn, chr->pilot.trn_name) == 0;
+    }
+
+    if(trn_loaded) {
+        for(int i = 0; i < SD_CHR_CUTSCENE_TEXT_COUNT; i++) {
+            if(str_size(&trn.locales[0]->end_texts[chr->pilot.har_id][i]) > 0) {
+                str_set(&chr->cutscene_text[i], &trn.locales[0]->end_texts[chr->pilot.har_id][i]);
+            }
+        }
+        static_assert(sizeof(chr->bk_name) == sizeof(trn.bk_name), "must match");
+        memcpy(chr->bk_name, trn.bk_name, sizeof(trn.bk_name));
+        chr->tournament_id = trn.tournament_id;
+        chr->winnings_multiplier = trn.winnings_multiplier;
+    }
+
+    // Read enemies block
+    mr = memreader_open_from_reader(r, 68 * chr->pilot.enemies_inc_unranked);
+    memreader_xor(mr, (chr->pilot.enemies_inc_unranked * 68) & 0xFF);
+
+    // Handle enemy data
+    for(int i = 0; i < chr->pilot.enemies_inc_unranked; i++) {
+        // Reserve & zero out
+        chr->enemies[i] = omf_calloc(1, sizeof(sd_chr_enemy));
+        sd_pilot_create(&chr->enemies[i]->pilot);
+        sd_pilot_load_player_from_mem(mr, &chr->enemies[i]->pilot);
+        if(chr->enemies[i]->pilot.har_id == 255) {
+            // pick a random HAR
+            purchase_random_har(&chr->enemies[i]->pilot);
+        }
+        purchase_random_har_upgrades(&chr->enemies[i]->pilot);
+        if(trn_loaded) {
+            memcpy(&chr->enemies[i]->pilot.palette, &sd_pic_get(&pic, trn.enemies[i]->photo_id)->pal,
+                   sizeof(vga_palette));
+            chr->enemies[i]->pilot.photo = omf_calloc(1, sizeof(sd_sprite));
+            if(trn.enemies[i]->photo) {
+                log_info("using pilot photo %d from tournament", i);
+                sd_sprite_copy(chr->enemies[i]->pilot.photo, trn.enemies[i]->photo);
+            } else {
+                sd_sprite_copy(chr->enemies[i]->pilot.photo, sd_pic_get(&pic, trn.enemies[i]->photo_id)->sprite);
+            }
+            //  copy all the "pilot" fields (eg. winnings) over from the tournament file
+            chr->enemies[i]->pilot.trn_rank_money = trn.enemies[i]->trn_rank_money;
+            chr->enemies[i]->pilot.trn_winnings_mult = trn.enemies[i]->trn_winnings_mult;
+            chr->enemies[i]->pilot.pilot_id = trn.enemies[i]->pilot_id;
+            chr->enemies[i]->pilot.unknown_k = trn.enemies[i]->unknown_k;
+            chr->enemies[i]->pilot.force_arena = trn.enemies[i]->force_arena;
+            chr->enemies[i]->pilot.difficulty = trn.enemies[i]->difficulty;
+            chr->enemies[i]->pilot.movement = trn.enemies[i]->movement;
+            // chr->enemies[i]->pilot.unk_block_c = trn.enemies[i]->unk_block_c;
+            memcpy(chr->enemies[i]->pilot.enhancements, trn.enemies[i]->enhancements,
+                   sizeof(chr->enemies[i]->pilot.enhancements));
+            chr->enemies[i]->pilot.secret = trn.enemies[i]->secret;
+            chr->enemies[i]->pilot.only_fight_once = trn.enemies[i]->only_fight_once;
+            chr->enemies[i]->pilot.req_rank = trn.enemies[i]->req_rank;
+            chr->enemies[i]->pilot.req_max_rank = trn.enemies[i]->req_max_rank;
+            chr->enemies[i]->pilot.req_fighter = trn.enemies[i]->req_fighter;
+            chr->enemies[i]->pilot.req_difficulty = trn.enemies[i]->req_difficulty;
+            chr->enemies[i]->pilot.req_enemy = trn.enemies[i]->req_enemy;
+            chr->enemies[i]->pilot.req_vitality = trn.enemies[i]->req_vitality;
+            chr->enemies[i]->pilot.req_accuracy = trn.enemies[i]->req_accuracy;
+            chr->enemies[i]->pilot.req_avg_dmg = trn.enemies[i]->req_avg_dmg;
+            chr->enemies[i]->pilot.req_scrap = trn.enemies[i]->req_scrap;
+            chr->enemies[i]->pilot.req_destroy = trn.enemies[i]->req_destroy;
+            chr->enemies[i]->pilot.att_normal = trn.enemies[i]->att_normal;
+            chr->enemies[i]->pilot.att_hyper = trn.enemies[i]->att_hyper;
+            chr->enemies[i]->pilot.att_def = trn.enemies[i]->att_def;
+            chr->enemies[i]->pilot.att_sniper = trn.enemies[i]->att_sniper;
+            chr->enemies[i]->pilot.ap_throw = trn.enemies[i]->ap_throw;
+            chr->enemies[i]->pilot.ap_special = trn.enemies[i]->ap_special;
+            chr->enemies[i]->pilot.ap_jump = trn.enemies[i]->ap_jump;
+            chr->enemies[i]->pilot.ap_high = trn.enemies[i]->ap_high;
+            chr->enemies[i]->pilot.ap_low = trn.enemies[i]->ap_low;
+            chr->enemies[i]->pilot.ap_middle = trn.enemies[i]->ap_middle;
+            chr->enemies[i]->pilot.pref_jump = trn.enemies[i]->pref_jump;
+            chr->enemies[i]->pilot.pref_fwd = trn.enemies[i]->pref_fwd;
+            chr->enemies[i]->pilot.pref_back = trn.enemies[i]->pref_back;
+            chr->enemies[i]->pilot.unknown_e = trn.enemies[i]->unknown_e;
+            chr->enemies[i]->pilot.learning = trn.enemies[i]->learning;
+            chr->enemies[i]->pilot.forget = trn.enemies[i]->forget;
+            // chr->enemies[i]->pilot.unk_block_f = trn.enemies[i]->unk_block_f;
+            chr->enemies[i]->pilot.winnings = trn.enemies[i]->winnings;
+            chr->enemies[i]->pilot.total_value = trn.enemies[i]->total_value;
+            chr->enemies[i]->pilot.photo_id = trn.enemies[i]->photo_id;
+            chr->enemies[i]->pilot.sex = sd_pic_get(&pic, trn.enemies[i]->photo_id)->sex;
+        }
+        memread_buf(mr, chr->enemies[i]->unknown_a, 9);
+        chr->enemies[i]->trn_index = memread_ubyte(mr);
+        memread_buf(mr, chr->enemies[i]->unknown_b, 15);
+
+        for(int m = 0; m < SD_PILOT_QUOTE_COUNT; m++) {
+            if(trn_loaded && str_size(&trn.enemies[i]->quotes[m]) > 0) {
+                str_set(&chr->enemies[i]->pilot.quotes[m], &trn.enemies[i]->quotes[m]);
+            }
+        }
+    }
+
+    if(trn_loaded) {
+        sd_pic_free(&pic);
+        sd_tournament_free(&trn);
+    }
+
+    // Close memory reader for enemy data block
+    memreader_close(mr);
+
+    // Read HAR palette
+    vga_palette_init(&chr->pal);
+    palette_load_range(r, &chr->pal, 0, 48);
+
+    // No idea what this is.
+    // TODO: Find out.
+    chr->unknown_b = sd_read_udword(r);
+
+    // Load sprite
+    chr->photo = omf_calloc(1, sizeof(sd_sprite));
+    sd_sprite_create(chr->photo);
+    if(sd_sprite_load(r, chr->photo) != SD_SUCCESS) {
+        goto error_1;
+    }
+
+    // Fix photo size
+    chr->photo->width++;
+    chr->photo->height++;
+
+    chr->pilot.photo = chr->photo;
+
+    // Load PIC file and make a surface
+    const path players_path = get_resource_filename("PLAYERS.PIC");
+    sd_pic_create(&players);
+    const int ret = sd_pic_load(&players, &players_path);
+    if(ret == SD_SUCCESS) {
+        modmanager_get_player_pics(&players);
+        // Load player gender from PLAYERS.PIC
+        const sd_pic_photo *photo = sd_pic_get(&players, chr->pilot.photo_id);
+        chr->pilot.sex = photo->sex;
+        chr->pilot.photo->render_width = photo->sprite->render_width;
+        chr->pilot.photo->render_height = photo->sprite->render_height;
+        sd_pic_free(&players);
+    }
+
+    // Load colors from other files
+    sd_pilot_set_player_color(&chr->pilot, PRIMARY, chr->pilot.color_1);
+    sd_pilot_set_player_color(&chr->pilot, SECONDARY, chr->pilot.color_2);
+    sd_pilot_set_player_color(&chr->pilot, TERTIARY, chr->pilot.color_3);
+
+    // Close & return
+    sd_reader_close(r);
+
+    return SD_SUCCESS;
+
+error_1:
+    for(int i = 0; i < chr->pilot.enemies_inc_unranked; i++) {
+        if(chr->enemies[i] != NULL) {
+            omf_free(chr->enemies[i]);
+        }
+    }
+    sd_sprite_free(chr->photo);
+    sd_reader_close(r);
+    return SD_FILE_PARSE_ERROR;
+}
+
+int sd_chr_save(const sd_chr_file *chr, const path *filename) {
+    assert(chr != NULL);
+    assert(filename != NULL);
+
+    sd_writer *w = sd_writer_open(filename);
+    if(!w) {
+        return SD_FILE_OPEN_ERROR;
+    }
+
+    // Save pilot and unknown
+    memwriter *mw = memwriter_open();
+    sd_pilot_save_to_mem(mw, &chr->pilot);
+    memwriter_xor(mw, 0xAC);
+    memwriter_save(mw, w);
+    memwriter_close(mw);
+
+    // TODO why did I have to add this
+    sd_writer_seek_cur(w, 20);
+
+    mw = memwriter_open();
+    for(int i = 0; i < chr->pilot.enemies_inc_unranked; i++) {
+        sd_pilot_save_player_to_mem(mw, &chr->enemies[i]->pilot);
+        memwrite_buf(mw, chr->enemies[i]->unknown_a, 9);
+        memwrite_ubyte(mw, chr->enemies[i]->trn_index);
+        memwrite_buf(mw, chr->enemies[i]->unknown_b, 15);
+    }
+    memwriter_xor(mw, (chr->pilot.enemies_inc_unranked * 68) & 0xFF);
+    memwriter_save(mw, w);
+    memwriter_close(mw);
+
+    // Save palette
+    palette_save_range(w, &chr->pal, 0, 48);
+
+    // Save this, whatever this is.
+    sd_write_udword(w, chr->unknown_b);
+
+    // Save photo. Hacky size fix.
+    chr->photo->width--;
+    chr->photo->height--;
+
+    if(SD_SUCCESS != sd_sprite_save(w, chr->photo)) {
+        return SD_FILE_WRITE_ERROR;
+    }
+    chr->photo->width++;
+    chr->photo->height++;
+
+    // Close & return
+    sd_writer_close(w);
+    return SD_SUCCESS;
+}
+
+void sd_chr_append_sanitized_filename(str *dst, const char *pilot_name) {
+    size_t len = strlen(pilot_name);
+    for(size_t i = 0; i < len; ++i) {
+        unsigned char c = pilot_name[i];
+        str_append_char(dst, isalnum(c) ? toupper(c) : '_');
+    }
+    str_append_c(dst, ".CHR");
+}
+
+void sd_chr_append_unsanitized_filename(str *dst, const char *pilot_name) {
+    str_append_c(dst, pilot_name);
+    str_append_c(dst, ".CHR");
+}
+
+void sd_chr_free(sd_chr_file *chr) {
+    for(int i = 0; i < chr->pilot.enemies_inc_unranked; i++) {
+        if(chr->enemies[i] != NULL) {
+            sd_pilot_free(&chr->enemies[i]->pilot);
+            omf_free(chr->enemies[i]);
+        }
+    }
+    for(int i = 0; i < SD_CHR_CUTSCENE_TEXT_COUNT; i++) {
+        str_free(&chr->cutscene_text[i]);
+    }
+    sd_sprite_free(chr->photo);
+    omf_free(chr->photo);
+}
+
+const sd_chr_enemy *sd_chr_get_enemy(const sd_chr_file *chr, int enemy_num) {
+    if(chr == NULL || enemy_num < 0 || enemy_num >= chr->pilot.enemies_inc_unranked) {
+        return NULL;
+    }
+    return chr->enemies[enemy_num];
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "dependencies": [
+    {
+      "name": "sdl2",
+      "default-features": false
+    },
+    {
+      "name": "sdl2",
+      "default-features": false,
+      "platform": "linux",
+      "features": [
+        "x11",
+        "wayland"
+      ]
+    },
+    {
+      "name": "sdl2-mixer",
+      "default-features": false
+    },
+    "libxmp",
+    "libepoxy",
+    "enet",
+    "libconfuse",
+    "libpng",
+    "opusfile"
+  ],
+  "features": {
+    "ci-deps": {
+      "description": "pull in everything for CI",
+      "dependencies": [ "cunit", "miniupnpc", "libnatpmp" ]
+    },
+    "use-tests": {
+      "description": "build cunit for USE_TESTS",
+      "dependencies": [ "cunit" ]
+    },
+    "miniupnpc": {
+      "description": "build miniupnpc",
+      "dependencies": [ "miniupnpc" ]
+    },
+    "natpmp": {
+      "description": "build natpmp",
+      "dependencies": [ "libnatpmp" ]
+    }
+  }
+}
