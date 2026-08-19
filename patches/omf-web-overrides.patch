@@ -1,0 +1,1244 @@
+diff -ruN '--exclude=.git' upstream-ref/CMakeLists.txt openomf/CMakeLists.txt
+--- a/openomf/CMakeLists.txt	2026-08-19 22:55:10.274764841 +1000
++++ b/openomf/CMakeLists.txt	2026-08-19 17:38:02.343738685 +1000
+@@ -306,6 +306,25 @@
+ 
+ # Build the game binary
+ add_executable(openomf src/main.c src/engine.c ${ICON_RESOURCE})
++
++# Emscripten / WebGL2 target-specific link flags
++if(EMSCRIPTEN)
++    set_target_properties(openomf PROPERTIES SUFFIX ".html")
++    target_link_options(openomf PRIVATE
++        -O3
++        "-sMAX_WEBGL_VERSION=2"
++        "-sMIN_WEBGL_VERSION=2"
++        "-sALLOW_MEMORY_GROWTH=1"
++        "-sINITIAL_MEMORY=67108864"
++        "-sFORCE_FILESYSTEM=1"
++        "-sINVOKE_RUN=0"
++        "-sAUTOLOAD_DYLIBS=0"
++        "-sEXPORTED_RUNTIME_METHODS=['callMain','FS','ccall','cwrap']"
++        "--shell-file" "${OPENOMF_SHELL_FILE}"
++        "--preload-file" "${OPENOMF_DATA_DIR}@/data"
++    )
++endif()
++
+ set_property(TARGET openomf PROPERTY
+     VS_DEBUGGER_ENVIRONMENT "OPENOMF_SHADER_DIR=${CMAKE_CURRENT_BINARY_DIR}/shaders
+ OPENOMF_RESOURCE_DIR=${CMAKE_CURRENT_BINARY_DIR}/resources")
+@@ -322,6 +341,9 @@
+ set(TOOL_TARGET_NAMES)
+ if(BUILD_LANGUAGES OR USE_TOOLS)
+     add_executable(languagetool tools/languagetool/main.c)
++    if(EMSCRIPTEN)
++        target_link_options(languagetool PRIVATE "-sAUTOLOAD_DYLIBS=0" "-sNODERAWFS=1")
++    endif()
+     list(APPEND TOOL_TARGET_NAMES languagetool)
+ endif()
+ if (USE_TOOLS)
+diff -ruN '--exclude=.git' upstream-ref/cmake-scripts/BuildLanguages.cmake openomf/cmake-scripts/BuildLanguages.cmake
+--- a/openomf/cmake-scripts/BuildLanguages.cmake	2026-08-19 22:55:10.275034994 +1000
++++ b/openomf/cmake-scripts/BuildLanguages.cmake	2026-08-19 16:42:10.360930204 +1000
+@@ -2,6 +2,14 @@
+     return()
+ endif()
+ 
++# When cross-compiling for Emscripten, the languagetool is a .js file that
++# must be run through node (CMAKE_CROSSCOMPILING_EMULATOR).
++if(EMSCRIPTEN)
++    set(LANG_TOOL_CMD ${CMAKE_CROSSCOMPILING_EMULATOR} "$<TARGET_FILE:languagetool>")
++else()
++    set(LANG_TOOL_CMD "$<TARGET_FILE:languagetool>")
++endif()
++
+ # OMF 2097 Epic Challenge Arena
+ set(LANG_STRCOUNT 1013)
+ set(OMF_LANGS ENGLISH GERMAN)
+@@ -26,7 +34,7 @@
+         DEPENDS "${TXT2}"
+         BYPRODUCTS "${DAT2}"
+         COMMAND ${CMAKE_COMMAND} -E echo_append "${LANG}, "
+-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT2}" -o "${DAT2}" --check-count ${LANG2_STRCOUNT}
++        COMMAND ${LANG_TOOL_CMD} -i "${TXT2}" -o "${DAT2}" --check-count ${LANG2_STRCOUNT}
+     )
+     install(FILES "${DAT2}" DESTINATION "${LANGUAGE_INSTALL_PATH}")
+ endforeach()
+@@ -40,8 +48,8 @@
+         DEPENDS "${TXT}" "${TXT2}"
+         BYPRODUCTS "${LNG}" "{LNG2}"
+         COMMAND ${CMAKE_COMMAND} -E echo_append "${LANG}, "
+-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT}" -o "${LNG}" --check-count ${LANG_STRCOUNT}
+-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT2}" -o "${LNG2}" --check-count ${LANG2_STRCOUNT}
++        COMMAND ${LANG_TOOL_CMD} -i "${TXT}" -o "${LNG}" --check-count ${LANG_STRCOUNT}
++        COMMAND ${LANG_TOOL_CMD} -i "${TXT2}" -o "${LNG2}" --check-count ${LANG2_STRCOUNT}
+     )
+     install(FILES "${LNG}" "${LNG2}" DESTINATION "${LANGUAGE_INSTALL_PATH}")
+ endforeach()
+diff -ruN '--exclude=.git' upstream-ref/shaders/debug_atlas.frag openomf/shaders/debug_atlas.frag
+--- a/openomf/shaders/debug_atlas.frag	2026-08-19 22:55:10.279363234 +1000
++++ b/openomf/shaders/debug_atlas.frag	2026-08-19 15:29:22.999524056 +1000
+@@ -1,13 +1,17 @@
+-#version 330 core
++#version 300 es
++
++precision highp float;
++precision highp sampler2D;
++precision highp usampler2D;
+ 
+ in vec2 tex_coord;
+ uniform sampler2D palette;
+ uniform usampler2D atlas;
+ 
+-layout (location = 0) out vec4 color;
++out vec4 color;
+ 
+ void main() {
+     uvec4 texel = texture(atlas, tex_coord);
+     ivec2 index = ivec2(texel.r, 0);
+     color = texelFetch(palette, index, 0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/palette.frag openomf/shaders/palette.frag
+--- a/openomf/shaders/palette.frag	2026-08-19 22:55:10.279397736 +1000
++++ b/openomf/shaders/palette.frag	2026-08-19 17:28:08.636493505 +1000
+@@ -1,6 +1,10 @@
+-#version 330 core
++#version 300 es
+ 
+-layout (location = 0) out vec4 color;
++precision highp float;
++precision highp int;
++precision highp usampler2D;
++
++out vec4 color;
+ 
+ in vec2 tex_coord;
+ flat in int transparency_index;
+@@ -15,55 +19,29 @@
+ uniform usampler2D atlas;
+ 
+ // Remap texture (GL_R16UI, 1024x19): uint16 palette index (0-1023) per texel.
+-// X axis is the source palette index, Y axis selects one of 19 remap tables.
+ uniform usampler2D remaps;
+ 
+-in vec4 gl_FragCoord;
+-
+-// for info about these options, see renderer_options in video/enums.h
+-bool SPRITE_REMAP = (options & 1u) != 0u;
+-bool SPRITE_SHADOWMASK = (options & 2u) != 0u;
+-bool SPRITE_INDEX_ADD = (options & 4u) != 0u;
+-bool SPRITE_HAR_QUIRKS = (options & 8u) != 0u;
+-bool SPRITE_DARK_TINT = (options & 0x10u) != 0u;
+-
+ const int MAGIC_REMAP_ROUNDS = 12;
+ const float PHI = 1.61803398874989484820459;
+ const float ATLAS_H = 2048.0;
+ const vec2 NATIVE_SIZE = vec2(320.0, 200.0);
+ 
+ float noise(in vec2 v) {
+-    // OMF had a fairly random offset for each row, because
+-    // they applied their noise row by row.
+-    // they then changed the threshold by 0x6b for each subsequent X.
+-    return fract(tan(10 * PHI * v.y) + (float(0x6b) * v.x) / 256.0);
++    return fract(tan(10.0 * PHI * v.y) + (float(0x6b) * v.x) / 256.0);
+ }
+ 
+ // Encode a palette index into the paletted framebuffer (GL_RGBA16).
+-// Channels are written selectively via glColorMask depending on blend mode:
+-//   MODE_SET:            RGBA  (base sprite)
+-//   MODE_DARK_TINT:      _GBA  (tint overlay)
+-//   MODE_REMAP:          _G__  (remap overlay, on top of existing R from MODE_SET)
+-//   MODE_SPRITE_SHADOW:  _G__  (shadow overlay, GL_MAX blended)
+-//   MODE_ADD:            ___A  (additive index overlay)
+-//
+-// Output channels:
+-//   R: palette index / 1023.0
+-//   G: (remap_offset + remap_rounds * 19 [+ index]) / 255.0 -- decoded by rgba.frag
+-//   B: dark tint palette index / 1023.0
+-//   A: additive index (index * 60) / 1023.0
+-vec4 handle(int index) {
+-    if (SPRITE_DARK_TINT) {
+-        // use magic rounds to detect if dark_tint's remap has been
+-        // overwritten by the pause menu's background
+-        float remap = float(remap_offset + MAGIC_REMAP_ROUNDS * 19) / 255.0;
++vec4 handle(int index, bool sprite_dark_tint, bool sprite_index_add,
++            int r_rounds, int r_offset) {
++    if (sprite_dark_tint) {
++        float remap = float(r_offset + MAGIC_REMAP_ROUNDS * 19) / 255.0;
+         return vec4(0.0, remap, float(index) / 1023.0, 0.0);
+     }
+-    if (remap_rounds > 0) {
+-        float remap = float(remap_offset + remap_rounds * 19 + index) / 255.0;
++    if (r_rounds > 0) {
++        float remap = float(r_offset + r_rounds * 19 + index) / 255.0;
+         return vec4(0.0, remap, 0.0, 0.0);
+     }
+-    if (SPRITE_INDEX_ADD) {
++    if (sprite_index_add) {
+         float add = float(index * 60) / 1023.0;
+         return vec4(0.0, 0.0, 0.0, add);
+     }
+@@ -71,19 +49,25 @@
+ }
+ 
+ void main() {
++    bool sprite_remap = (options & 1u) != 0u;
++    bool sprite_shadowmask = (options & 2u) != 0u;
++    bool sprite_index_add = (options & 4u) != 0u;
++    bool sprite_har_quirks = (options & 8u) != 0u;
++    bool sprite_dark_tint = (options & 0x10u) != 0u;
++
+     // Don't render if we're decimating due to opacity
+-    float decimate_limit = opacity / 255.0;
++    float decimate_limit = float(opacity) / 255.0;
+     float decimate_value = noise(gl_FragCoord.xy);
+     if (decimate_value > decimate_limit) {
+         discard;
+     }
+ 
+-    if (SPRITE_SHADOWMASK) {
++    if (sprite_shadowmask) {
+         // make four samples to generate coverage
+         int coverage = 0;
+         for(int y = 0; y < 4; y++) {
+             float offset = float(y - 1) / ATLAS_H;
+-            uvec4 texel = textureLod(atlas, tex_coord + vec2(0, offset), 0);
++            uvec4 texel = texture(atlas, tex_coord + vec2(0.0, offset));
+             int index = int(texel.r);
+             coverage += int(index != transparency_index);
+         }
+@@ -93,12 +77,12 @@
+             discard;
+         }
+ 
+-        color = handle(coverage);
++        color = handle(coverage, sprite_dark_tint, sprite_index_add, remap_rounds, remap_offset);
+         return;
+     }
+ 
+ 
+-    uvec4 texel = textureLod(atlas, tex_coord, 0);
++    uvec4 texel = texture(atlas, tex_coord);
+ 
+     // Don't render if it's transparent pixel
+     int index = int(texel.r);
+@@ -111,13 +95,13 @@
+         index = clamp(index + palette_offset, 0, palette_limit);
+     }
+ 
+-    bool NO_REMAP = SPRITE_HAR_QUIRKS && index > 0x30;
++    bool no_remap = sprite_har_quirks && index > 0x30;
+ 
+     // If remapping is on, do it now.
+-    if (SPRITE_REMAP && !NO_REMAP) {
++    if (sprite_remap && !no_remap) {
+         uvec4 remap = texelFetch(remaps, ivec2(index, remap_offset), 0);
+         index = int(remap.r);
+     }
+ 
+-    color = handle(index);
+-}
++    color = handle(index, sprite_dark_tint, sprite_index_add, remap_rounds, remap_offset);
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/palette.vert openomf/shaders/palette.vert
+--- a/openomf/shaders/palette.vert	2026-08-19 22:55:10.279425184 +1000
++++ b/openomf/shaders/palette.vert	2026-08-19 15:28:21.446703966 +1000
+@@ -1,4 +1,4 @@
+-#version 330 core
++#version 300 es
+ 
+ layout (location = 0) in vec2 in_position;
+ layout (location = 1) in vec2 in_tex_coord;
+@@ -30,4 +30,4 @@
+     options = in_options;
+     tex_coord = in_tex_coord.xy;
+     gl_Position = projection * vec4(in_position.xy, 0.0, 1.0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/rgba.frag openomf/shaders/rgba.frag
+--- a/openomf/shaders/rgba.frag	2026-08-19 22:55:10.279451236 +1000
++++ b/openomf/shaders/rgba.frag	2026-08-19 17:28:24.346633759 +1000
+@@ -1,31 +1,23 @@
+-#version 330 core
++#version 300 es
++
++precision highp float;
++precision highp int;
++precision highp sampler2D;
++precision highp usampler2D;
+ 
+ // In
+ in vec2 tex_coord;
+ uniform sampler2D palette;
+ 
+-// Paletted framebuffer (GL_RGBA16), written by palette.frag.
+-// Channels are built up by multiple draw passes with different blend modes:
+-//   R: palette index / 1023.0 (MODE_SET)
+-//   G: (remap_offset + remap_rounds * 19 [+ index]) / 255.0 (MODE_REMAP / MODE_SPRITE_SHADOW / MODE_DARK_TINT)
+-//   B: dark tint palette index / 1023.0  (MODE_DARK_TINT)
+-//   A: additive index (index * 60) / 1023.0 (MODE_ADD)
+ uniform sampler2D framebuffer;
+-
+-// Remap texture (GL_R16UI, 1024x19): uint16 palette index (0-1023) per texel.
+-// X axis is the source palette index, Y axis selects one of 19 remap tables.
+ uniform usampler2D remaps;
+ 
+ uniform uint framebuffer_options;
+ 
+-// for info about these options, see renderer_framebuffer_options in video/enums.h
+-bool FBUFOPT_CREDITS = (framebuffer_options & 0x01u) != 0u;
+-
+-// It's magic!
+ const int MAGIC_REMAP_ROUNDS = 12;
+ 
+ // Out
+-layout (location = 0) out vec4 color;
++out vec4 color;
+ 
+ void set_color(int index) {
+     ivec2 pal_index = ivec2(index, 0);
+@@ -33,14 +25,15 @@
+ }
+ 
+ void main() {
+-    vec4 texel = textureLod(framebuffer, tex_coord, 0);
++    bool fbufopt_credits = (framebuffer_options & 0x01u) != 0u;
++
++    vec4 texel = textureLod(framebuffer, tex_coord, 0.0);
+     int idx = int(texel.r * 1023.0 + 0.5);
+     int remap_enc = int(texel.g * 255.0);
+     int darktint = int(texel.b * 1023.0 + 0.5);
+     int idx_add = int(texel.a * 1023.0 + 0.5);
+ 
+-    if(FBUFOPT_CREDITS) {
+-        // SPRITE_INDEX_ADD
++    if(fbufopt_credits) {
+         set_color(idx + idx_add);
+         return;
+     }
+@@ -48,34 +41,23 @@
+     int remap_row = remap_enc % 19;
+     int remap_rounds = remap_enc / 19;
+ 
+-    // SPRITE_INDEX_ADD
+     idx += idx_add;
+ 
+-    // SPRITE_DARK_TINT
+     if(darktint > 0 && remap_rounds != MAGIC_REMAP_ROUNDS){
+-        // DARK_TINT's remap got trampled by the pause menu,
+-        // so the HAR's color with the pause menu remap.
+         idx = darktint;
+     } else if(darktint >= 0x60) {
+-        // pyros flames draw opaque, no remaps.
+         idx = darktint;
+         remap_rounds = 0;
+     } else if(darktint > 0) {
+-        // lookup color we're drawing ontop in fifth remap to get brightness
+         uvec4 remap_val = texelFetch(remaps, ivec2(idx, 4), 0);
+         int behind = 1 + clamp(int(remap_val.r) - 0xA8, 0, 7) * 2;
+-
+-        // this indexed blending is not exactly correct, but i am
+-        // done fiddling with it for now-- if someone finds the
+-        // code for this in MASTER.DAT, then we can correct it.
+         idx = (darktint & 0xF0) + ((darktint & 0x0F) * 3 + behind * 2) / 5;
+     }
+ 
+-    // TODO: precalculate palette to 2d texture for required remappings later.
+     for (int i = 0; i < remap_rounds; i++) {
+         uvec4 remap_texel = texelFetch(remaps, ivec2(idx, remap_row), 0);
+         idx = int(remap_texel.r);
+     }
+ 
+     set_color(idx);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/rgba.vert openomf/shaders/rgba.vert
+--- a/openomf/shaders/rgba.vert	2026-08-19 22:55:10.279477706 +1000
++++ b/openomf/shaders/rgba.vert	2026-08-19 15:28:33.580866242 +1000
+@@ -1,4 +1,4 @@
+-#version 330 core
++#version 300 es
+ 
+ const vec2 posCoord[4] = vec2[](vec2(320.0, 200.0), vec2(0.0, 200.0), vec2(0.0, 0.0), vec2(320.0, 0.0));
+ const vec2 texCoord[4] = vec2[](vec2(1.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+@@ -9,4 +9,4 @@
+ void main() {
+     tex_coord = texCoord[gl_VertexID].xy;
+     gl_Position = projection * vec4(posCoord[gl_VertexID].xy, 0.0, 1.0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/bilinear.frag openomf/shaders/scalers/bilinear.frag
+--- a/openomf/shaders/scalers/bilinear.frag	2026-08-19 22:55:10.279532603 +1000
++++ b/openomf/shaders/scalers/bilinear.frag	2026-08-19 15:29:11.014364962 +1000
+@@ -1,12 +1,15 @@
+-#version 330 core
++#version 300 es
++
++precision highp float;
++precision highp sampler2D;
+ 
+ // In
+ in vec2 tex_coord;
+-uniform sampler2D framebuffer;
+ uniform vec2 texture_size;
++uniform sampler2D framebuffer;
+ 
+ // Out
+-layout (location = 0) out vec4 color;
++out vec4 color;
+ 
+ void main() {
+     vec2 texel = tex_coord * texture_size - 0.5;
+@@ -23,4 +26,4 @@
+     vec4 c0 = mix(c00, c10, texel_fract.x);
+     vec4 c1 = mix(c01, c11, texel_fract.x);
+     color = mix(c0, c1, texel_fract.y);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/bilinear.vert openomf/shaders/scalers/bilinear.vert
+--- a/openomf/shaders/scalers/bilinear.vert	2026-08-19 22:55:10.279565708 +1000
++++ b/openomf/shaders/scalers/bilinear.vert	2026-08-19 15:29:08.978337908 +1000
+@@ -1,4 +1,4 @@
+-#version 330 core
++#version 300 es
+ 
+ const vec2 posCoord[4] = vec2[](vec2(320.0, 200.0), vec2(0.0, 200.0), vec2(0.0, 0.0), vec2(320.0, 0.0));
+ const vec2 texCoord[4] = vec2[](vec2(1.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+@@ -9,4 +9,4 @@
+ void main() {
+     tex_coord = texCoord[gl_VertexID].xy;
+     gl_Position = projection * vec4(posCoord[gl_VertexID].xy, 0.0, 1.0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/crt.frag openomf/shaders/scalers/crt.frag
+--- a/openomf/shaders/scalers/crt.frag	2026-08-19 22:55:10.279592738 +1000
++++ b/openomf/shaders/scalers/crt.frag	2026-08-19 15:29:21.685506627 +1000
+@@ -1,9 +1,12 @@
+-#version 330 core
++#version 300 es
++
++precision highp float;
++precision highp sampler2D;
+ 
+ // Note: This is modified from https://godotshaders.com/shader/very-simple-crt-shader/
+ 
+-uniform float scanline_intensity = 0.25;
+-uniform float color_bleed_weight = 0.35;
++const float scanline_intensity = 0.25;
++const float color_bleed_weight = 0.35;
+ 
+ // In
+ in vec2 tex_coord;
+@@ -11,7 +14,7 @@
+ uniform sampler2D framebuffer;
+ 
+ // Out
+-layout (location = 0) out vec4 color;
++out vec4 color;
+ 
+ void main() {
+     // Darken top halves of pixels
+@@ -26,4 +29,4 @@
+     vec4 this_pixel_color = texture(framebuffer, tex_coord);
+ 
+     color = adjacent_pixel_color_average * color_bleed_weight + this_pixel_color * (1.0 - color_bleed_weight) - vec4(vec3(color_dark_offset), 0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/crt.vert openomf/shaders/scalers/crt.vert
+--- a/openomf/shaders/scalers/crt.vert	2026-08-19 22:55:10.279621513 +1000
++++ b/openomf/shaders/scalers/crt.vert	2026-08-19 15:29:19.315475182 +1000
+@@ -1,4 +1,4 @@
+-#version 330 core
++#version 300 es
+ 
+ const vec2 posCoord[4] = vec2[](vec2(320.0, 200.0), vec2(0.0, 200.0), vec2(0.0, 0.0), vec2(320.0, 0.0));
+ const vec2 texCoord[4] = vec2[](vec2(1.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+@@ -9,4 +9,4 @@
+ void main() {
+     tex_coord = texCoord[gl_VertexID].xy;
+     gl_Position = projection * vec4(posCoord[gl_VertexID].xy, 0.0, 1.0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/none.frag openomf/shaders/scalers/none.frag
+--- a/openomf/shaders/scalers/none.frag	2026-08-19 22:55:10.279657971 +1000
++++ b/openomf/shaders/scalers/none.frag	2026-08-19 15:28:43.330996414 +1000
+@@ -1,4 +1,7 @@
+-#version 330 core
++#version 300 es
++
++precision highp float;
++precision highp sampler2D;
+ 
+ // In
+ in vec2 tex_coord;
+@@ -6,9 +9,9 @@
+ uniform sampler2D framebuffer;
+ 
+ // Out
+-layout (location = 0) out vec4 color;
++out vec4 color;
+ 
+ void main() {
+     // This is a simple passthrough.
+     color = texture(framebuffer, tex_coord);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/shaders/scalers/none.vert openomf/shaders/scalers/none.vert
+--- a/openomf/shaders/scalers/none.vert	2026-08-19 22:55:10.279693451 +1000
++++ b/openomf/shaders/scalers/none.vert	2026-08-19 15:28:43.043992585 +1000
+@@ -1,4 +1,4 @@
+-#version 330 core
++#version 300 es
+ 
+ const vec2 posCoord[4] = vec2[](vec2(320.0, 200.0), vec2(0.0, 200.0), vec2(0.0, 0.0), vec2(320.0, 0.0));
+ const vec2 texCoord[4] = vec2[](vec2(1.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+@@ -9,4 +9,4 @@
+ void main() {
+     tex_coord = texCoord[gl_VertexID].xy;
+     gl_Position = projection * vec4(posCoord[gl_VertexID].xy, 0.0, 1.0);
+-}
++}
+\ No newline at end of file
+diff -ruN '--exclude=.git' upstream-ref/src/audio/music_sources/opus_source.c openomf/src/audio/music_sources/opus_source.c
+--- a/openomf/src/audio/music_sources/opus_source.c	2026-08-19 22:55:10.280281040 +1000
++++ b/openomf/src/audio/music_sources/opus_source.c	2026-08-19 17:01:00.298032802 +1000
+@@ -203,4 +203,9 @@
+     return false;
+ }
+ 
++bool opus_load_memory(music_source *src, int channels, int sample_rate, const unsigned char *buffer, size_t buflen) {
++    log_error("No opusfile support!");
++    return false;
++}
++
+ #endif
+diff -ruN '--exclude=.git' upstream-ref/src/console/console.c openomf/src/console/console.c
+--- a/openomf/src/console/console.c	2026-08-19 22:55:10.280631233 +1000
++++ b/openomf/src/console/console.c	2026-08-19 20:58:58.136767357 +1000
+@@ -232,7 +232,7 @@
+     menu_background_create(&con->background2, 322, 101, MenuBackground);
+ 
+     // Read from stdin needs to be nonblocking
+-#if !defined(WIN32) && !defined(_WIN32)
++#if !defined(WIN32) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+     fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
+ #endif
+ 
+@@ -329,7 +329,7 @@
+ }
+ 
+ static size_t get_stdin_line(char *line, size_t size) {
+-#if !defined(WIN32) && !defined(_WIN32)
++#if !defined(WIN32) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+     ssize_t n = read(0, line, size);
+     if(n > 0) {
+         line[n - 1] = '\0';
+diff -ruN '--exclude=.git' upstream-ref/src/engine.c openomf/src/engine.c
+--- a/openomf/src/engine.c	2026-08-19 22:55:10.281362629 +1000
++++ b/openomf/src/engine.c	2026-08-19 15:35:50.224548151 +1000
+@@ -22,6 +22,11 @@
+ #include "video/video.h"
+ #include <SDL.h>
+ #include <stdio.h>
++#include <string.h>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ #define MAX_TICKS_PER_FRAME 10
+ #define TICK_EXPIRY_MS 100
+@@ -148,14 +153,266 @@
+     omf_free(time);
+ }
+ 
++// Shared game loop state. The loop is either driven by a blocking while loop
++// (native) or by a requestAnimationFrame callback (Emscripten).
++typedef struct {
++    SDL_Event event;
++    bool check_fs;
++    int visual_debugger;
++    int debugger_proceed;
++    int debugger_render;
++    uint64_t mouse_visible_ticks;
++    uint64_t frame_start;
++    int dynamic_wait;
++    int static_wait;
++    game_state *gs;
++} engine_loop_state;
++
++// One iteration of the game loop: handle events, tick the simulation and
++// render a single frame.
++static void engine_loop_iteration(engine_loop_state *st) {
++    SDL_Event *e = &st->event;
++
++    // Handle events
++    while(SDL_PollEvent(e)) {
++        // Handle other events
++        switch(e->type) {
++            case SDL_QUIT:
++                run = 0;
++                break;
++            case SDL_KEYDOWN:
++                if(e->key.keysym.sym == SDLK_F1) {
++                    video_schedule_screenshot(save_screenshot);
++                }
++                if(e->key.keysym.sym == SDLK_F2) {
++                    save_palette_shot();
++                }
++                if(e->key.keysym.sym == SDLK_F3) {
++                    if(st->gs->rec) {
++                        save_rec(st->gs);
++                    }
++                }
++                if(e->key.keysym.sym == SDLK_F9) {
++                    video_draw_atlas(true);
++                }
++                if(e->key.keysym.sym == SDLK_F10) {
++                    video_draw_atlas(false);
++                }
++                if(e->key.keysym.sym == SDLK_F5) {
++                    st->visual_debugger = !st->visual_debugger;
++                }
++                if(st->visual_debugger && !console_window_is_open() && e->key.keysym.sym == SDLK_SPACE) {
++                    st->dynamic_wait += 20;
++                    st->static_wait += 20;
++                } else if(st->visual_debugger && !console_window_is_open() &&
++                          (e->key.keysym.sym >= SDLK_1 && e->key.keysym.sym <= SDLK_9)) {
++                    st->debugger_proceed = 1 + e->key.keysym.sym - SDLK_1;
++                }
++                if(!console_window_is_open() && e->key.keysym.sym == SDLK_BACKSPACE) {
++                    if(game_state_get_player(st->gs, 0)->ctrl->type == CTRL_TYPE_REC) {
++                        controller_rewind(game_state_get_player(st->gs, 0)->ctrl);
++                        controller_rewind(game_state_get_player(st->gs, 1)->ctrl);
++                        if(st->gs->new_state) {
++                            // one of the controllers wants to replace the game state
++                            game_state *old_gs = st->gs;
++                            game_state *new_gs = st->gs->new_state;
++                            st->gs = new_gs;
++                            game_state_clone_free(old_gs);
++                            omf_free(old_gs);
++
++                            // apply palette transforms
++                            game_state_palette_transform(st->gs);
++                            vga_state_render();
++                        }
++                        st->visual_debugger = 1;
++                    }
++                }
++                if(e->key.keysym.sym == SDLK_F6) {
++                    st->debugger_render = !st->debugger_render;
++                }
++                break;
++            case SDL_JOYDEVICEADDED:
++                joystick_deviceadded(e->jdevice.which);
++                break;
++            case SDL_JOYDEVICEREMOVED:
++                joystick_deviceremoved(e->jdevice.which);
++                break;
++            case SDL_MOUSEMOTION:
++                st->mouse_visible_ticks = 1000;
++                SDL_ShowCursor(1);
++                break;
++            case SDL_WINDOWEVENT:
++                switch(e->window.event) {
++                    case SDL_WINDOWEVENT_MINIMIZED:
++                        log_debug("MINIMIZED");
++                        enable_screen_updates = 0;
++                        break;
++                    case SDL_WINDOWEVENT_HIDDEN:
++                        log_debug("HIDDEN");
++                        enable_screen_updates = 0;
++                        break;
++                    case SDL_WINDOWEVENT_MAXIMIZED:
++                        log_debug("MAXIMIZED");
++                        enable_screen_updates = 1;
++                        break;
++                    case SDL_WINDOWEVENT_RESTORED:
++                        video_get_state(NULL, NULL, &st->check_fs, NULL, NULL, NULL);
++                        if(st->check_fs) {
++                            video_reinit_renderer();
++                        }
++                        log_debug("RESTORED");
++                        enable_screen_updates = 1;
++                        break;
++                    case SDL_WINDOWEVENT_SHOWN:
++                        enable_screen_updates = 1;
++                        log_debug("SHOWN");
++                        break;
++                }
++                break;
++        }
++
++        // Console events
++        if(e->type == SDL_KEYDOWN) {
++            if(console_window_is_open() &&
++               (e->key.keysym.scancode == SDL_SCANCODE_GRAVE || e->key.keysym.sym == SDLK_BACKQUOTE ||
++                e->key.keysym.sym == SDLK_TAB || e->key.keysym.sym == SDLK_ESCAPE)) {
++                console_window_close();
++                continue;
++            } else if(e->key.keysym.sym == SDLK_TAB || e->key.keysym.sym == SDLK_BACKQUOTE ||
++                      e->key.keysym.scancode == SDL_SCANCODE_GRAVE) {
++                console_window_open();
++                continue;
++            }
++        }
++
++        // If console windows is open, pass events to console.
++        // Otherwise to the objects.
++        if(console_window_is_open()) {
++            console_event(st->gs, e);
++        } else {
++            game_state_handle_event(st->gs, e);
++        }
++    }
++
++    // hide mouse after n ticks
++    if(st->mouse_visible_ticks > 0) {
++        st->mouse_visible_ticks -= SDL_GetTicks64() - st->frame_start;
++        if(st->mouse_visible_ticks <= 0) {
++            SDL_ShowCursor(0);
++        }
++    }
++
++    // Render scene
++    uint64_t frame_dt = SDL_GetTicks64() - st->frame_start;
++    st->frame_start = SDL_GetTicks64();
++    if(!st->visual_debugger) {
++        st->dynamic_wait += frame_dt;
++        st->static_wait += frame_dt;
++    } else {
++        console_tick(st->gs);
++    }
++
++    // drop ticks if it's been too long since they were due
++    st->dynamic_wait = min2(st->dynamic_wait, TICK_EXPIRY_MS);
++    st->static_wait = min2(st->static_wait, TICK_EXPIRY_MS);
++
++    // In warp mode, allow more ticks to happen per vsync period.
++    bool has_dynamic = true;
++    bool has_static = true;
++    int tick_limit = MAX_TICKS_PER_FRAME;
++    do {
++        int dyntick_ms = game_state_ms_per_dyntick(st->gs);
++        if(st->debugger_proceed > 0) {
++            st->dynamic_wait += dyntick_ms;
++            st->static_wait += STATIC_TICKS;
++            st->debugger_proceed--;
++        }
++
++        // Tick static features. This is a fixed with-rate tick, and is meant for running things
++        // that are not dependent on game speed (such as menus).
++        has_static = st->static_wait > STATIC_TICKS;
++        if(has_static) {
++            game_state_static_tick(st->gs, false);
++            // check if we need to replace the game state
++            if(st->gs->new_state) {
++                // one of the controllers wants to replace the game state
++                game_state *old_gs = st->gs;
++                game_state *new_gs = st->gs->new_state;
++                st->gs = new_gs;
++                // st->gs->new_state = NULL;
++                game_state_clone_free(old_gs);
++                omf_free(old_gs);
++            }
++            console_tick(st->gs);
++            osd_tick();
++            st->static_wait -= STATIC_TICKS;
++        }
++
++        // Tick dynamic features. This is a dynamically changing tick, and it depends on things such as
++        // hit-pause, hit slowdown and game-speed slider. It is meant for ticking everything that has to do
++        // with the actual gameplay stuff.
++        has_dynamic = st->dynamic_wait > dyntick_ms;
++        if(has_dynamic) {
++            game_state_dynamic_tick(st->gs, false);
++            st->dynamic_wait -= dyntick_ms;
++            if(st->gs->delay > 0) {
++                log_debug("applying delay %d", st->gs->delay);
++                SDL_Delay(4);
++                st->gs->delay--;
++                st->dynamic_wait -= 4;
++            }
++        }
++
++        // Ensure any pending palette changes are handled after any ticks are made.
++        if(has_dynamic || has_static) {
++            game_state_palette_transform(st->gs);
++            vga_state_render();
++        }
++    } while(tick_limit-- && (has_dynamic || has_static));
++
++    // Do the actual video rendering jobs
++    if(enable_screen_updates) {
++        video_render_prepare(game_state_get_framebuffer_options(st->gs));
++        game_state_render(st->gs);
++        if(st->debugger_render) {
++            game_state_debug(st->gs);
++        }
++        osd_render();
++        console_render();
++        video_render_finish();
++    } else {
++        // If screen updates are disabled, then wait
++        SDL_Delay(1);
++    }
++}
++
++static void engine_loop_finish(engine_loop_state *st) {
++    joystick_close();
++
++    // Free scene object
++    game_state_free(&st->gs);
++
++    log_info(" --- END GAME LOG ---");
++}
++
++#ifdef __EMSCRIPTEN__
++static engine_loop_state web_loop_state;
++
++static void emscripten_tick(void) {
++    engine_loop_state *st = &web_loop_state;
++    if(!run || !game_state_is_running(st->gs)) {
++        run = 0;
++        emscripten_cancel_main_loop();
++        engine_loop_finish(st);
++        engine_close();
++        return;
++    }
++    engine_loop_iteration(st);
++}
++#endif
++
+ void engine_run(const engine_init_flags *init_flags) {
+     SDL_Event e;
+-    int visual_debugger = 0;
+-    int debugger_proceed = 0;
+-    int debugger_render = 0;
+-
+-    // if mouse_visible_ticks <= 0, hide mouse
+-    uint64_t mouse_visible_ticks = 1000;
+ 
+     log_info(" --- BEGIN GAME LOG ---");
+ 
+@@ -181,239 +438,32 @@
+     audio_set_sound_volume(settings_get()->sound.sound_vol / 10.0f);
+ 
+     // Set up game
+-    game_state *gs = omf_calloc(1, sizeof(game_state));
+-    if(game_state_create(gs, init_flags)) {
+-        game_state_free(&gs);
++    engine_loop_state st;
++    memset(&st, 0, sizeof(st));
++    st.mouse_visible_ticks = 1000;
++    st.gs = omf_calloc(1, sizeof(game_state));
++    if(game_state_create(st.gs, init_flags)) {
++        game_state_free(&st.gs);
+         return;
+     }
+ 
+     joystick_init();
+ 
+-    // Game loop
+-    uint64_t frame_start = SDL_GetTicks64(); // Set game tick timer
+-    int dynamic_wait = 0;
+-    int static_wait = 0;
+-    while(run && game_state_is_running(gs)) {
+-        // Handle events
+-        bool check_fs;
+-        while(SDL_PollEvent(&e)) {
+-            // Handle other events
+-            switch(e.type) {
+-                case SDL_QUIT:
+-                    run = 0;
+-                    break;
+-                case SDL_KEYDOWN:
+-                    if(e.key.keysym.sym == SDLK_F1) {
+-                        video_schedule_screenshot(save_screenshot);
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F2) {
+-                        save_palette_shot();
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F3) {
+-                        if(gs->rec) {
+-                            save_rec(gs);
+-                        }
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F9) {
+-                        video_draw_atlas(true);
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F10) {
+-                        video_draw_atlas(false);
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F5) {
+-                        visual_debugger = !visual_debugger;
+-                    }
+-                    if(visual_debugger && !console_window_is_open() && e.key.keysym.sym == SDLK_SPACE) {
+-                        dynamic_wait += 20;
+-                        static_wait += 20;
+-                    } else if(visual_debugger && !console_window_is_open() &&
+-                              (e.key.keysym.sym >= SDLK_1 && e.key.keysym.sym <= SDLK_9)) {
+-                        debugger_proceed = 1 + e.key.keysym.sym - SDLK_1;
+-                    }
+-                    if(!console_window_is_open() && e.key.keysym.sym == SDLK_BACKSPACE) {
+-                        if(game_state_get_player(gs, 0)->ctrl->type == CTRL_TYPE_REC) {
+-                            controller_rewind(game_state_get_player(gs, 0)->ctrl);
+-                            controller_rewind(game_state_get_player(gs, 1)->ctrl);
+-                            if(gs->new_state) {
+-                                // one of the controllers wants to replace the game state
+-                                game_state *old_gs = gs;
+-                                game_state *new_gs = gs->new_state;
+-                                gs = new_gs;
+-                                game_state_clone_free(old_gs);
+-                                omf_free(old_gs);
+-
+-                                // apply palette transforms
+-                                game_state_palette_transform(gs);
+-                                vga_state_render();
+-                            }
+-                            visual_debugger = 1;
+-                        }
+-                    }
+-                    if(e.key.keysym.sym == SDLK_F6) {
+-                        debugger_render = !debugger_render;
+-                    }
+-                    break;
+-                case SDL_JOYDEVICEADDED:
+-                    joystick_deviceadded(e.jdevice.which);
+-                    break;
+-                case SDL_JOYDEVICEREMOVED:
+-                    joystick_deviceremoved(e.jdevice.which);
+-                    break;
+-                case SDL_MOUSEMOTION:
+-                    mouse_visible_ticks = 1000;
+-                    SDL_ShowCursor(1);
+-                    break;
+-                case SDL_WINDOWEVENT:
+-                    switch(e.window.event) {
+-                        case SDL_WINDOWEVENT_MINIMIZED:
+-                            log_debug("MINIMIZED");
+-                            enable_screen_updates = 0;
+-                            break;
+-                        case SDL_WINDOWEVENT_HIDDEN:
+-                            log_debug("HIDDEN");
+-                            enable_screen_updates = 0;
+-                            break;
+-                        case SDL_WINDOWEVENT_MAXIMIZED:
+-                            log_debug("MAXIMIZED");
+-                            enable_screen_updates = 1;
+-                            break;
+-                        case SDL_WINDOWEVENT_RESTORED:
+-                            video_get_state(NULL, NULL, &check_fs, NULL, NULL, NULL);
+-                            if(check_fs) {
+-                                video_reinit_renderer();
+-                            }
+-                            log_debug("RESTORED");
+-                            enable_screen_updates = 1;
+-                            break;
+-                        case SDL_WINDOWEVENT_SHOWN:
+-                            enable_screen_updates = 1;
+-                            log_debug("SHOWN");
+-                            break;
+-                    }
+-                    break;
+-            }
+-
+-            // Console events
+-            if(e.type == SDL_KEYDOWN) {
+-                if(console_window_is_open() &&
+-                   (e.key.keysym.scancode == SDL_SCANCODE_GRAVE || e.key.keysym.sym == SDLK_BACKQUOTE ||
+-                    e.key.keysym.sym == SDLK_TAB || e.key.keysym.sym == SDLK_ESCAPE)) {
+-                    console_window_close();
+-                    continue;
+-                } else if(e.key.keysym.sym == SDLK_TAB || e.key.keysym.sym == SDLK_BACKQUOTE ||
+-                          e.key.keysym.scancode == SDL_SCANCODE_GRAVE) {
+-                    console_window_open();
+-                    continue;
+-                }
+-            }
+-
+-            // If console windows is open, pass events to console.
+-            // Otherwise to the objects.
+-            if(console_window_is_open()) {
+-                console_event(gs, &e);
+-            } else {
+-                game_state_handle_event(gs, &e);
+-            }
+-        }
++    st.frame_start = SDL_GetTicks64(); // Set game tick timer
+ 
+-        // hide mouse after n ticks
+-        if(mouse_visible_ticks > 0) {
+-            mouse_visible_ticks -= SDL_GetTicks64() - frame_start;
+-            if(mouse_visible_ticks <= 0) {
+-                SDL_ShowCursor(0);
+-            }
+-        }
+-
+-        // Render scene
+-        uint64_t frame_dt = SDL_GetTicks64() - frame_start;
+-        frame_start = SDL_GetTicks64();
+-        if(!visual_debugger) {
+-            dynamic_wait += frame_dt;
+-            static_wait += frame_dt;
+-        } else {
+-            console_tick(gs);
+-        }
+-
+-        // drop ticks if it's been too long since they were due
+-        dynamic_wait = min2(dynamic_wait, TICK_EXPIRY_MS);
+-        static_wait = min2(static_wait, TICK_EXPIRY_MS);
+-
+-        // In warp mode, allow more ticks to happen per vsync period.
+-        bool has_dynamic = true;
+-        bool has_static = true;
+-        int tick_limit = MAX_TICKS_PER_FRAME;
+-        do {
+-            int dyntick_ms = game_state_ms_per_dyntick(gs);
+-            if(debugger_proceed > 0) {
+-                dynamic_wait += dyntick_ms;
+-                static_wait += STATIC_TICKS;
+-                debugger_proceed--;
+-            }
+-
+-            // Tick static features. This is a fixed with-rate tick, and is meant for running things
+-            // that are not dependent on game speed (such as menus).
+-            has_static = static_wait > STATIC_TICKS;
+-            if(has_static) {
+-                game_state_static_tick(gs, false);
+-                // check if we need to replace the game state
+-                if(gs->new_state) {
+-                    // one of the controllers wants to replace the game state
+-                    game_state *old_gs = gs;
+-                    game_state *new_gs = gs->new_state;
+-                    gs = new_gs;
+-                    // gs->new_state = NULL;
+-                    game_state_clone_free(old_gs);
+-                    omf_free(old_gs);
+-                }
+-                console_tick(gs);
+-                osd_tick();
+-                static_wait -= STATIC_TICKS;
+-            }
+-
+-            // Tick dynamic features. This is a dynamically changing tick, and it depends on things such as
+-            // hit-pause, hit slowdown and game-speed slider. It is meant for ticking everything that has to do
+-            // with the actual gameplay stuff.
+-            has_dynamic = dynamic_wait > dyntick_ms;
+-            if(has_dynamic) {
+-                game_state_dynamic_tick(gs, false);
+-                dynamic_wait -= dyntick_ms;
+-                if(gs->delay > 0) {
+-                    log_debug("applying delay %d", gs->delay);
+-                    SDL_Delay(4);
+-                    gs->delay--;
+-                    dynamic_wait -= 4;
+-                }
+-            }
+-
+-            // Ensure any pending palette changes are handled after any ticks are made.
+-            if(has_dynamic || has_static) {
+-                game_state_palette_transform(gs);
+-                vga_state_render();
+-            }
+-        } while(tick_limit-- && (has_dynamic || has_static));
+-
+-        // Do the actual video rendering jobs
+-        if(enable_screen_updates) {
+-            video_render_prepare(game_state_get_framebuffer_options(gs));
+-            game_state_render(gs);
+-            if(debugger_render) {
+-                game_state_debug(gs);
+-            }
+-            osd_render();
+-            console_render();
+-            video_render_finish();
+-        } else {
+-            // If screen updates are disabled, then wait
+-            SDL_Delay(1);
+-        }
++#ifdef __EMSCRIPTEN__
++    // Drive the game loop from the browser's requestAnimationFrame so that the
++    // page stays responsive. main() returns immediately; the game continues to
++    // run inside the emscripten_tick() callback until it tears itself down.
++    web_loop_state = st;
++    emscripten_set_main_loop(emscripten_tick, 0, 1);
++#else
++    // Game loop
++    while(run && game_state_is_running(st.gs)) {
++        engine_loop_iteration(&st);
+     }
+-
+-    joystick_close();
+-
+-    // Free scene object
+-    game_state_free(&gs);
+-
+-    log_info(" --- END GAME LOG ---");
++    engine_loop_finish(&st);
++#endif
+ }
+ 
+ void engine_close(void) {
+diff -ruN '--exclude=.git' upstream-ref/src/main.c openomf/src/main.c
+--- a/openomf/src/main.c	2026-08-19 22:55:10.283566454 +1000
++++ b/openomf/src/main.c	2026-08-19 17:14:39.753452607 +1000
+@@ -184,6 +184,11 @@
+ #else
+     log_set_level(LOG_INFO); // In release mode, drop debugs.
+ #endif
++#ifdef __EMSCRIPTEN__
++    // Always log to stderr in the browser so we can see boot diagnostics.
++    log_add_stderr(LOG_DEBUG, true);
++    log_set_level(LOG_DEBUG);
++#endif
+     if(log_level->count > 0) {
+         if(!is_log_level(log_level->sval[0])) {
+             fprintf(stderr, "Invalid loging level value %s\n", log_level->sval[0]);
+@@ -288,8 +293,11 @@
+     engine_run(&init_flags);
+     retval = 0;
+ 
+-    // Close everything
++#ifndef __EMSCRIPTEN__
++    // On Emscripten, main() returns immediately after registering the main
++    // loop; the engine tears itself down when the loop ends instead.
+     engine_close();
++#endif
+ exit_4:
+     enet_deinitialize();
+ exit_3:
+diff -ruN '--exclude=.git' upstream-ref/src/video/renderers/opengl3/helpers/object_array.c openomf/src/video/renderers/opengl3/helpers/object_array.c
+--- a/openomf/src/video/renderers/opengl3/helpers/object_array.c	2026-08-19 22:55:10.293892041 +1000
++++ b/openomf/src/video/renderers/opengl3/helpers/object_array.c	2026-08-19 16:32:39.880092046 +1000
+@@ -131,7 +131,14 @@
+ 
+ void object_array_draw(const object_array *array, object_array_batch *state) {
+     int count = state->end - state->start;
++#ifdef __EMSCRIPTEN__
++    /* glMultiDrawArrays is not in GLES3 / WebGL2 core; unroll it. */
++    for(int i = 0; i < count; i++) {
++        glDrawArrays(GL_TRIANGLE_FAN, array->fans_starts[state->start + i], array->fans_sizes[state->start + i]);
++    }
++#else
+     glMultiDrawArrays(GL_TRIANGLE_FAN, array->fans_starts + state->start, array->fans_sizes + state->start, count);
++#endif
+ }
+ 
+ #define COORDS(ptr, cx, cy, tx, ty, transparency, remap_offset, remap_rounds, pal_offset, pal_limit, opacity, options) \
+diff -ruN '--exclude=.git' upstream-ref/src/video/renderers/opengl3/helpers/render_target.c openomf/src/video/renderers/opengl3/helpers/render_target.c
+--- a/openomf/src/video/renderers/opengl3/helpers/render_target.c	2026-08-19 22:55:10.294122942 +1000
++++ b/openomf/src/video/renderers/opengl3/helpers/render_target.c	2026-08-19 16:32:31.984960817 +1000
+@@ -15,7 +15,13 @@
+ render_target *render_target_create(GLuint tex_unit, int w, int h, GLint internal_format, GLenum format,
+                                     GLenum filtering) {
+     render_target *target = omf_calloc(1, sizeof(render_target));
+-    target->texture_id = texture_create(tex_unit, w, h, internal_format, format, GL_UNSIGNED_BYTE, filtering);
++    GLenum type = GL_UNSIGNED_BYTE;
++#ifdef __EMSCRIPTEN__
++    /* GL_RGBA16 is #defined to GL_RGBA16F (half-float) for WebGL2, which
++       requires GL_FLOAT as the pixel transfer type. */
++    if(internal_format == GL_RGBA16F) type = GL_FLOAT;
++#endif
++    target->texture_id = texture_create(tex_unit, w, h, internal_format, format, type, filtering);
+     target->fbo_id = fbo_create(target->texture_id);
+     target->tex_unit = tex_unit;
+     return target;
+diff -ruN '--exclude=.git' upstream-ref/src/video/renderers/opengl3/helpers/vbo.c openomf/src/video/renderers/opengl3/helpers/vbo.c
+--- a/openomf/src/video/renderers/opengl3/helpers/vbo.c	2026-08-19 22:55:10.294412511 +1000
++++ b/openomf/src/video/renderers/opengl3/helpers/vbo.c	2026-08-19 17:01:13.372215760 +1000
+@@ -1,6 +1,8 @@
+ #include "video/renderers/opengl3/helpers/vbo.h"
+ #include "video/renderers/opengl3/helpers/bindings.h"
+ 
++#include <stdlib.h>
++
+ GLuint vbo_create(GLsizeiptr size) {
+     GLuint id;
+     glGenBuffers(1, &id);
+@@ -9,6 +11,24 @@
+     return id;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++/* WebGL2 has no buffer mapping; emulate it with a CPU-side staging buffer
++   that gets uploaded via glBufferSubData on unmap. */
++static void *vbo_mapped_ptr = NULL;
++
++void *vbo_map(GLuint id, GLsizei size) {
++    bindings_bind_vbo(id);
++    vbo_mapped_ptr = malloc(size);
++    return vbo_mapped_ptr;
++}
++
++void vbo_unmap(GLuint id, GLsizei size) {
++    bindings_bind_vbo(id);
++    glBufferSubData(GL_ARRAY_BUFFER, 0, size, vbo_mapped_ptr);
++    free(vbo_mapped_ptr);
++    vbo_mapped_ptr = NULL;
++}
++#else
+ void *vbo_map(GLuint id, GLsizei size) {
+     bindings_bind_vbo(id);
+     return glMapBufferRange(GL_ARRAY_BUFFER, 0, size,
+@@ -20,6 +40,7 @@
+     glFlushMappedBufferRange(GL_ARRAY_BUFFER, 0, size);
+     glUnmapBuffer(GL_ARRAY_BUFFER);
+ }
++#endif
+ 
+ void vbo_free(GLuint id) {
+     bindings_unbind_vbo(id);
+diff -ruN '--exclude=.git' upstream-ref/src/video/renderers/opengl3/sdl_window.c openomf/src/video/renderers/opengl3/sdl_window.c
+--- a/openomf/src/video/renderers/opengl3/sdl_window.c	2026-08-19 22:55:10.294476906 +1000
++++ b/openomf/src/video/renderers/opengl3/sdl_window.c	2026-08-19 15:29:32.793653864 +1000
+@@ -48,6 +48,13 @@
+ }
+ 
+ bool has_gl_available(int version_major, int version_minor) {
++#ifdef __EMSCRIPTEN__
++    // In the browser, WebGL2 is the only context type available, and probing by
++    // creating extra hidden windows is not supported. Just report it as available.
++    (void)version_major;
++    (void)version_minor;
++    return true;
++#else
+     SDL_Window *w;
+     SDL_GLContext *c;
+     bool ret = false;
+@@ -71,16 +78,24 @@
+     SDL_DestroyWindow(w);
+ exit_0:
+     return ret;
++#endif
+ }
+ 
+ bool create_window(SDL_Window **window, int width, int height, bool fullscreen) {
+     char title[32];
+     snprintf(title, 32, "OpenOMF v%s", get_version_string());
+ 
++    #ifdef __EMSCRIPTEN__
++    // In the browser we get a WebGL2 context, which exposes the GLES 3.0 API.
++    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
++    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
++    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
++#else
+     // Request OpenGL 3.3 core context. This also gives us GLSL 330.
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
++#endif
+ 
+     // RGBA8888
+     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
