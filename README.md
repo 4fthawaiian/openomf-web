@@ -36,7 +36,23 @@ WASM, patches the game source for WebGL2, and produces the final
 ## What was changed
 
 The original OpenOMF is a desktop C/SDL2/OpenGL 3.3 game. This repo adds the
-patches and build infrastructure to cross-compile it to the web:
+patches and build infrastructure to cross-compile it to the web.
+
+`openomf/` is a **git subtree** of [`omf2097/openomf`](https://github.com/omf2097/openomf)
+with a small patch set applied on top. The full patch lives in
+`patches/omf-web-overrides.patch` (git-applyable from the repo root).
+
+### Keeping in sync with upstream
+
+```bash
+git subtree pull --prefix openomf https://github.com/omf2097/openomf master --squash
+git apply patches/omf-web-overrides.patch   # if it no longer applies, fix the conflicts
+./build.sh                                   # rebuild + retest
+git add -A && git commit -m "Sync upstream; reapply web overrides" && git push
+```
+
+Upstream changes rarely touch the web layer, so the patch usually applies
+unmodified; when it doesn't, the conflicts are confined to the files below.
 
 ### Source patches (`openomf/`)
 
@@ -51,6 +67,7 @@ patches and build infrastructure to cross-compile it to the web:
 | `src/audio/music_sources/opus_source.c` | Added stub `opus_load_memory` when opusfile is disabled |
 | `cmake-scripts/BuildLanguages.cmake` | Run the languagetool via node cross-compiling emulator under Emscripten |
 | `CMakeLists.txt` | Target-specific Emscripten link flags (WebGL2, filesystem, shell, preload); `AUTOLOAD_DYLIBS=0` for tools |
+| `src/console/console.c` | Disable debug-console stdin reads on Emscripten (browser `read(0)` fires `window.prompt` dialogs) |
 | `shaders/*.vert`, `shaders/*.frag` | Translated all 12 shaders from GLSL 330 core to GLSL ES 3.00 (precision qualifiers, `texture` instead of `textureLod` for `usampler2D`, moved bool initializers into `main`, etc.) |
 
 ### Build infrastructure
