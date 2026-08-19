@@ -6,6 +6,8 @@ the open-source remake of the 1994 fighting game *One Must Fall: 2097*.
 Runs in any modern browser with WebGL2 support — desktop or mobile. Includes
 an on-screen touch controller for phones and tablets.
 
+![One Must Fall 2097 running in a browser with the on-screen touch controller](screenshot.png)
+
 ## Quick start
 
 ```bash
