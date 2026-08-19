@@ -15,7 +15,13 @@ typedef struct render_target {
 render_target *render_target_create(GLuint tex_unit, int w, int h, GLint internal_format, GLenum format,
                                     GLenum filtering) {
     render_target *target = omf_calloc(1, sizeof(render_target));
-    target->texture_id = texture_create(tex_unit, w, h, internal_format, format, GL_UNSIGNED_BYTE, filtering);
+    GLenum type = GL_UNSIGNED_BYTE;
+#ifdef __EMSCRIPTEN__
+    /* GL_RGBA16 is #defined to GL_RGBA16F (half-float) for WebGL2, which
+       requires GL_FLOAT as the pixel transfer type. */
+    if(internal_format == GL_RGBA16F) type = GL_FLOAT;
+#endif
+    target->texture_id = texture_create(tex_unit, w, h, internal_format, format, type, filtering);
     target->fbo_id = fbo_create(target->texture_id);
     target->tex_unit = tex_unit;
     return target;

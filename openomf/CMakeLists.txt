@@ -306,6 +306,25 @@ include_directories(${COREINCS})
 
 # Build the game binary
 add_executable(openomf src/main.c src/engine.c ${ICON_RESOURCE})
+
+# Emscripten / WebGL2 target-specific link flags
+if(EMSCRIPTEN)
+    set_target_properties(openomf PROPERTIES SUFFIX ".html")
+    target_link_options(openomf PRIVATE
+        -O3
+        "-sMAX_WEBGL_VERSION=2"
+        "-sMIN_WEBGL_VERSION=2"
+        "-sALLOW_MEMORY_GROWTH=1"
+        "-sINITIAL_MEMORY=67108864"
+        "-sFORCE_FILESYSTEM=1"
+        "-sINVOKE_RUN=0"
+        "-sAUTOLOAD_DYLIBS=0"
+        "-sEXPORTED_RUNTIME_METHODS=['callMain','FS','ccall','cwrap']"
+        "--shell-file" "${OPENOMF_SHELL_FILE}"
+        "--preload-file" "${OPENOMF_DATA_DIR}@/data"
+    )
+endif()
+
 set_property(TARGET openomf PROPERTY
     VS_DEBUGGER_ENVIRONMENT "OPENOMF_SHADER_DIR=${CMAKE_CURRENT_BINARY_DIR}/shaders
 OPENOMF_RESOURCE_DIR=${CMAKE_CURRENT_BINARY_DIR}/resources")
@@ -322,6 +341,9 @@ add_dependencies(openomf copy_shaders)
 set(TOOL_TARGET_NAMES)
 if(BUILD_LANGUAGES OR USE_TOOLS)
     add_executable(languagetool tools/languagetool/main.c)
+    if(EMSCRIPTEN)
+        target_link_options(languagetool PRIVATE "-sAUTOLOAD_DYLIBS=0" "-sNODERAWFS=1")
+    endif()
     list(APPEND TOOL_TARGET_NAMES languagetool)
 endif()
 if (USE_TOOLS)

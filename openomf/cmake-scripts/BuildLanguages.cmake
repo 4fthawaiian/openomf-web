@@ -2,6 +2,14 @@ if(NOT BUILD_LANGUAGES)
     return()
 endif()
 
+# When cross-compiling for Emscripten, the languagetool is a .js file that
+# must be run through node (CMAKE_CROSSCOMPILING_EMULATOR).
+if(EMSCRIPTEN)
+    set(LANG_TOOL_CMD ${CMAKE_CROSSCOMPILING_EMULATOR} "$<TARGET_FILE:languagetool>")
+else()
+    set(LANG_TOOL_CMD "$<TARGET_FILE:languagetool>")
+endif()
+
 # OMF 2097 Epic Challenge Arena
 set(LANG_STRCOUNT 1013)
 set(OMF_LANGS ENGLISH GERMAN)
@@ -26,7 +34,7 @@ foreach(LANG ${OMF_LANGS})
         DEPENDS "${TXT2}"
         BYPRODUCTS "${DAT2}"
         COMMAND ${CMAKE_COMMAND} -E echo_append "${LANG}, "
-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT2}" -o "${DAT2}" --check-count ${LANG2_STRCOUNT}
+        COMMAND ${LANG_TOOL_CMD} -i "${TXT2}" -o "${DAT2}" --check-count ${LANG2_STRCOUNT}
     )
     install(FILES "${DAT2}" DESTINATION "${LANGUAGE_INSTALL_PATH}")
 endforeach()
@@ -40,8 +48,8 @@ foreach(LANG ${OPENOMF_LANGS})
         DEPENDS "${TXT}" "${TXT2}"
         BYPRODUCTS "${LNG}" "{LNG2}"
         COMMAND ${CMAKE_COMMAND} -E echo_append "${LANG}, "
-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT}" -o "${LNG}" --check-count ${LANG_STRCOUNT}
-        COMMAND "$<TARGET_FILE:languagetool>" -i "${TXT2}" -o "${LNG2}" --check-count ${LANG2_STRCOUNT}
+        COMMAND ${LANG_TOOL_CMD} -i "${TXT}" -o "${LNG}" --check-count ${LANG_STRCOUNT}
+        COMMAND ${LANG_TOOL_CMD} -i "${TXT2}" -o "${LNG2}" --check-count ${LANG2_STRCOUNT}
     )
     install(FILES "${LNG}" "${LNG2}" DESTINATION "${LANGUAGE_INSTALL_PATH}")
 endforeach()

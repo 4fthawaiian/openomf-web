@@ -48,6 +48,13 @@ void ortho2d(GLfloat *matrix, float left, float right, float bottom, float top) 
 }
 
 bool has_gl_available(int version_major, int version_minor) {
+#ifdef __EMSCRIPTEN__
+    // In the browser, WebGL2 is the only context type available, and probing by
+    // creating extra hidden windows is not supported. Just report it as available.
+    (void)version_major;
+    (void)version_minor;
+    return true;
+#else
     SDL_Window *w;
     SDL_GLContext *c;
     bool ret = false;
@@ -71,16 +78,24 @@ exit_1:
     SDL_DestroyWindow(w);
 exit_0:
     return ret;
+#endif
 }
 
 bool create_window(SDL_Window **window, int width, int height, bool fullscreen) {
     char title[32];
     snprintf(title, 32, "OpenOMF v%s", get_version_string());
 
+    #ifdef __EMSCRIPTEN__
+    // In the browser we get a WebGL2 context, which exposes the GLES 3.0 API.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
     // Request OpenGL 3.3 core context. This also gives us GLSL 330.
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+#endif
 
     // RGBA8888
     SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);

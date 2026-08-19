@@ -1,9 +1,12 @@
-#version 330 core
+#version 300 es
+
+precision highp float;
+precision highp sampler2D;
 
 // Note: This is modified from https://godotshaders.com/shader/very-simple-crt-shader/
 
-uniform float scanline_intensity = 0.25;
-uniform float color_bleed_weight = 0.35;
+const float scanline_intensity = 0.25;
+const float color_bleed_weight = 0.35;
 
 // In
 in vec2 tex_coord;
@@ -11,7 +14,7 @@ uniform vec2 texture_size;
 uniform sampler2D framebuffer;
 
 // Out
-layout (location = 0) out vec4 color;
+out vec4 color;
 
 void main() {
     // Darken top halves of pixels

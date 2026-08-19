@@ -131,7 +131,14 @@ bool object_array_get_batch(const object_array *array, object_array_batch *state
 
 void object_array_draw(const object_array *array, object_array_batch *state) {
     int count = state->end - state->start;
+#ifdef __EMSCRIPTEN__
+    /* glMultiDrawArrays is not in GLES3 / WebGL2 core; unroll it. */
+    for(int i = 0; i < count; i++) {
+        glDrawArrays(GL_TRIANGLE_FAN, array->fans_starts[state->start + i], array->fans_sizes[state->start + i]);
+    }
+#else
     glMultiDrawArrays(GL_TRIANGLE_FAN, array->fans_starts + state->start, array->fans_sizes + state->start, count);
+#endif
 }
 
 #define COORDS(ptr, cx, cy, tx, ty, transparency, remap_offset, remap_rounds, pal_offset, pal_limit, opacity, options) \

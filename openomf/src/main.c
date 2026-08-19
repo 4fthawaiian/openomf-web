@@ -184,6 +184,11 @@ int main(int argc, char *argv[]) {
 #else
     log_set_level(LOG_INFO); // In release mode, drop debugs.
 #endif
+#ifdef __EMSCRIPTEN__
+    // Always log to stderr in the browser so we can see boot diagnostics.
+    log_add_stderr(LOG_DEBUG, true);
+    log_set_level(LOG_DEBUG);
+#endif
     if(log_level->count > 0) {
         if(!is_log_level(log_level->sval[0])) {
             fprintf(stderr, "Invalid loging level value %s\n", log_level->sval[0]);
@@ -288,8 +293,11 @@ int main(int argc, char *argv[]) {
     engine_run(&init_flags);
     retval = 0;
 
-    // Close everything
+#ifndef __EMSCRIPTEN__
+    // On Emscripten, main() returns immediately after registering the main
+    // loop; the engine tears itself down when the loop ends instead.
     engine_close();
+#endif
 exit_4:
     enet_deinitialize();
 exit_3:
