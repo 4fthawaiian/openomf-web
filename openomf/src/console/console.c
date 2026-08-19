@@ -232,7 +232,7 @@ bool console_init(void) {
     menu_background_create(&con->background2, 322, 101, MenuBackground);
 
     // Read from stdin needs to be nonblocking
-#if !defined(WIN32) && !defined(_WIN32)
+#if !defined(WIN32) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK);
 #endif
 
@@ -329,7 +329,7 @@ void console_render(void) {
 }
 
 static size_t get_stdin_line(char *line, size_t size) {
-#if !defined(WIN32) && !defined(_WIN32)
+#if !defined(WIN32) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
     ssize_t n = read(0, line, size);
     if(n > 0) {
         line[n - 1] = '\0';
