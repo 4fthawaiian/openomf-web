@@ -85,6 +85,14 @@ The on-screen controller maps to the game's keyboard inputs:
 
 On desktop, the physical keyboard works as normal.
 
+## Audio notes
+
+- **iOS / iPadOS**: audio unlocks on the first tap. If you hear nothing, make
+  sure the physical **mute switch** (above the volume buttons, or Control
+  Center) is off — iOS silently mutes all web audio when it is enabled.
+- Browsers require a user gesture before audio starts; the game resumes SDL's
+  AudioContext on tap/click.
+
 ## Project structure
 
 ```

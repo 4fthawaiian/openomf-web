@@ -281,14 +281,18 @@
   // blocks. We grab SDL's context and resume it synchronously in the gesture.
   var audioUnlocked = false;
   function unlockSDL2Audio() {
-    if (audioUnlocked) return;
-    try {
-      var S = Module.SDL2;
-      if (S && S.audioContext && S.audioContext.state === 'suspended') {
-        var p = S.audioContext.resume();
-        if (p && p.then) p.then(function () {}, function () {});
+    var S = Module.SDL2;
+    if (!S || !S.audioContext || audioUnlocked) return;
+    if (S.audioContext.state === 'suspended') {
+      var p = S.audioContext.resume();
+      if (p && p.then) {
+        p.then(function () { audioUnlocked = true; }, function () {});
+      } else {
+        audioUnlocked = true;
       }
-    } catch (e) {}
+    } else {
+      audioUnlocked = true;
+    }
   }
 
   function startGame() {
