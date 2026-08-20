@@ -21,6 +21,11 @@ echo "== Using $(emcc --version | head -1)"
 build_dep_cmake() {
     local name=$1
     shift
+    local done_marker=$PREFIX/lib/.dep-$name.done
+    if [ -f "$done_marker" ]; then
+        echo "=== $name already built, skipping (remove $done_marker to rebuild)"
+        return
+    fi
     local bdir=$WORK/build/$name
     rm -rf "$bdir"
     mkdir -p "$bdir"
@@ -34,6 +39,7 @@ build_dep_cmake() {
         "$@"
     cmake --build "$bdir" -j"$JOBS"
     cmake --install "$bdir"
+    touch "$done_marker"
 }
 
 # extract all tarballs
@@ -45,7 +51,7 @@ for f in $DEPSRC/*; do
     esac
 done
 # canonical source dir names so build_dep_cmake can find them (idempotent)
-for n in SDL2 SDL2_mixer libxmp enet confuse zlib libpng; do
+for n in SDL2 SDL2_mixer libxmp enet confuse zlib libpng opus libogg opusfile; do
     if [ ! -d "$WORK/extracted/$n" ]; then
         mv -f "$WORK/extracted/${n}-"*/ "$WORK/extracted/$n"
     fi
@@ -75,6 +81,15 @@ build_dep_cmake libpng \
 
 # confuse ships autotools only; build it with emconfigure + the bundled configure
 echo "=== building confuse ==="
+# WASM fix: confuse.c declares `extern void cfg_yylex_destroy(void)` but the
+# flex-generated lexer.c DEFINES `int yylex_destroy(void)`. The return-type
+# mismatch is harmless on native ABIs but traps under WASM when cfg_free()
+# calls it. Reconcile both sides to `int`.
+if grep -q "extern void cfg_yylex_destroy(void);" "$WORK/extracted/confuse/src/confuse.c"; then
+    sed -i 's|extern void cfg_yylex_destroy(void);|extern int cfg_yylex_destroy(void);|' \
+        "$WORK/extracted/confuse/src/confuse.c"
+    echo "patched confuse cfg_yylex_destroy signature"
+fi
 if [ ! -f "$PREFIX/lib/libconfuse.a" ]; then
     cd "$WORK/extracted/confuse"
     emconfigure ./configure --prefix=$PREFIX --disable-shared --enable-static \
@@ -99,6 +114,46 @@ build_dep_cmake SDL2_mixer \
     -DSDL2MIXER_WAVPACK=OFF -DSDL2MIXER_GME=OFF \
     -DSDL2MIXER_MIDI=OFF -DSDL2MIXER_MIDI_NATIVE=OFF \
     -DSDL2MIXER_MIDI_TIMIDITY=OFF -DSDL2MIXER_STB_VORBIS=OFF
+
+# --------------------------------------------------- opus / ogg / opusfile ----
+# Music mod support: opusfile decodes .ogg (Opus) files from mod zips.
+build_dep_cmake libogg \
+    -DBUILD_SHARED_LIBS=OFF
+
+build_dep_cmake opus \
+    -DBUILD_SHARED_LIBS=OFF -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_TESTING=OFF \
+    -DOPUS_USE_ASM=OFF
+
+# opusfile ships autotools only, and the emscripten container has no
+# pkg-config. configure accepts DEPS_CFLAGS/DEPS_LIBS to override the
+# pkg-config probe for its ogg/opus dependencies, so use those directly.
+echo "=== building opusfile ==="
+cd "$WORK/extracted/opusfile"
+DEPS_CFLAGS="-I$PREFIX/include -I$PREFIX/include/opus" \
+DEPS_LIBS="-L$PREFIX/lib -logg -lopus" \
+emconfigure ./configure --prefix=$PREFIX \
+    --disable-shared --enable-static --disable-http --disable-examples --disable-doc
+emmake make -j"$JOBS"
+make install
+cd "$WORK/extracted"
+
+# Merge opusfile + opus + ogg into a single archive. The game links against
+# libopusfile.a via FindOpusFile, but the final link needs the opus/ogg
+# symbols too; folding them in avoids static link-order issues.
+MERGEDIR=$WORK/build/opus-merge
+rm -rf "$MERGEDIR"
+mkdir -p "$MERGEDIR"/{opusfile,opus,ogg}
+(cd "$MERGEDIR/opusfile" && emar x "$PREFIX/lib/libopusfile.a")
+(cd "$MERGEDIR/opus"     && emar x "$PREFIX/lib/libopus.a")
+(cd "$MERGEDIR/ogg"      && emar x "$PREFIX/lib/libogg.a")
+for d in opusfile opus ogg; do
+    for f in "$MERGEDIR/$d"/*.o; do
+        [ -f "$f" ] && mv "$f" "$MERGEDIR/$d/${d}-$(basename "$f")"
+    done
+done
+emar rcs "$PREFIX/lib/libopusfile.a" \
+    "$MERGEDIR"/opusfile/*.o "$MERGEDIR"/opus/*.o "$MERGEDIR"/ogg/*.o
+rm -rf "$MERGEDIR"
 
 # enet installs to a non-standard subdir; make sure the Find module sees it
 if [ -f "$PREFIX/lib/static/libenet.a" ] && [ ! -f "$PREFIX/lib/libenet.a" ]; then
@@ -140,7 +195,7 @@ emcmake cmake -S /src -B "$OBDIR" \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DOPENOMF_SHELL_FILE=/shell/shell.html \
     -DOPENOMF_DATA_DIR=/data-src \
-    -DUSE_MINIUPNPC=OFF -DUSE_NATPMP=OFF -DUSE_OPUSFILE=OFF \
+    -DUSE_MINIUPNPC=OFF -DUSE_NATPMP=OFF -DUSE_OPUSFILE=ON \
     -DUSE_TESTS=OFF -DUSE_TOOLS=OFF -DBUILD_LANGUAGES=ON
 
 echo "=== building openomf ==="

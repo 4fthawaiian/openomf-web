@@ -104,6 +104,33 @@
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 4px;
     color: rgba(160,200,255,.5); font-size: 10px; letter-spacing: 1px;
   }
+
+  /* ---------- mod drop overlay ---------- */
+  #dropoverlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0,0,0,.7);
+    border: 3px dashed #3d6fb0;
+  }
+  #dropoverlay.active { display: flex; }
+  #dropoverlay p {
+    color: #cfe3ff; font-size: clamp(16px, 4vw, 24px);
+    letter-spacing: 2px; text-align: center;
+  }
+
+  /* ---------- toast ---------- */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    z-index: 60;
+    background: rgba(15,26,48,.95); border: 1px solid #3d6fb0; border-radius: 10px;
+    color: #cfe3ff; padding: 12px 24px; font-size: 14px; letter-spacing: .5px;
+    box-shadow: 0 4px 20px rgba(0,0,0,.6);
+    opacity: 0; transition: opacity .3s; pointer-events: none;
+    max-width: 90vw; text-align: center;
+  }
+  #toast.show { opacity: 1; }
+  #toast a { color: #6fa8dc; text-decoration: underline; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -128,6 +155,12 @@
   <div id="status">Downloading...</div>
   <button id="startbtn" class="disabled">TAP TO START</button>
 </div>
+
+<!-- Mod drop overlay -->
+<div id="dropoverlay"><p>Drop mod .zip to install</p></div>
+
+<!-- Toast notification -->
+<div id="toast"></div>
 
 <script type="text/javascript">
   'use strict';
@@ -161,11 +194,27 @@
           ENV.OPENOMF_STATE_PATH     = '/statedir';
         }
         // Create the writable layout dirs the engine expects. /data is the
-        // preloaded (read-only) resource mount.
+        // preloaded (read-only) resource mount. /configdir and /statedir are
+        // backed by IDBFS so settings, save states, and user-dropped mods
+        // survive page reloads.
         if (typeof FS !== 'undefined') {
-          var dirs = ['/data/mods', '/configdir', '/statedir'];
-          for (var i = 0; i < dirs.length; i++) {
-            try { FS.mkdir(dirs[i]); } catch (e) { /* already exists */ }
+          try { FS.mkdir('/data/mods'); } catch (e) { /* preloaded */ }
+
+          try { FS.mkdir('/configdir'); } catch (e) {}
+          try { FS.mkdir('/statedir'); } catch (e) {}
+
+          if (typeof IDBFS !== 'undefined') {
+            try {
+              FS.mount(IDBFS, {}, '/configdir');
+              FS.mount(IDBFS, {}, '/statedir');
+            } catch (e) { console.warn('IDBFS mount failed:', e); }
+            // Populate in-memory FS from IndexedDB
+            FS.syncfs(true, function (err) {
+              if (err) { console.warn('IDBFS sync failed:', err); }
+              try { FS.mkdir('/statedir/mods'); } catch (e) { /* exists */ }
+            });
+          } else {
+            try { FS.mkdir('/statedir/mods'); } catch (e) {}
           }
         }
       }
@@ -320,6 +369,81 @@
   document.addEventListener('touchstart', function () { unlockSDL2Audio(); }, { once: true });
   // fallback if the data package never reports complete (already loaded)
   setTimeout(function () { if (startBtn.classList.contains('disabled')) { statusEl.textContent = ''; startBtn.classList.remove('disabled'); } }, 8000);
+
+  /* --------------------------- mod loading --------------------------- */
+  var dropOverlay = document.getElementById('dropoverlay');
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+
+  function showToast(msg, duration) {
+    toastEl.innerHTML = msg;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, duration || 4000);
+  }
+
+  // Periodically flush IDBFS to IndexedDB so settings / save states persist.
+  // (Mod-dropped files sync immediately in installMod; this covers gameplay
+  // writes like career progress and key bindings.)
+  setInterval(function () {
+    if (started && typeof IDBFS !== 'undefined') {
+      FS.syncfs(false, function () {});
+    }
+  }, 15000);
+
+  function installMod(filename, arrayBuffer) {
+    if (typeof FS === 'undefined') { showToast('Filesystem not ready yet'); return; }
+    try { FS.mkdir('/statedir/mods'); } catch (e) { /* exists */ }
+    var path = '/statedir/mods/' + filename;
+    FS.writeFile(path, new Uint8Array(arrayBuffer));
+    if (typeof IDBFS !== 'undefined') {
+      FS.syncfs(false, function (err) {
+        if (err) console.warn('IDBFS write sync failed:', err);
+      });
+    }
+    var msg = 'Mod installed: ' + filename;
+    if (started) {
+      msg += ' &mdash; <a onclick="location.reload()">reload</a> to apply';
+    }
+    showToast(msg, 6000);
+  }
+
+  var dragCounter = 0;
+  window.addEventListener('dragenter', function (ev) {
+    ev.preventDefault();
+    if (ev.dataTransfer && ev.dataTransfer.types && Array.from(ev.dataTransfer.types).indexOf('Files') >= 0) {
+      dragCounter++;
+      dropOverlay.classList.add('active');
+    }
+  });
+  window.addEventListener('dragleave', function (ev) {
+    ev.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('active'); }
+  });
+  window.addEventListener('dragover', function (ev) {
+    ev.preventDefault();
+    if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('drop', function (ev) {
+    ev.preventDefault();
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+    if (!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) return;
+    var files = ev.dataTransfer.files;
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (!f.name.toLowerCase().endsWith('.zip')) {
+        showToast('Skipped ' + f.name + ' (not a .zip)', 3000);
+        continue;
+      }
+      (function (filename) {
+        var reader = new FileReader();
+        reader.onload = function (e) { installMod(filename, e.target.result); };
+        reader.readAsArrayBuffer(f);
+      })(f.name);
+    }
+  });
 </script>
 {{{ SCRIPT }}}
 </body>

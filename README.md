@@ -77,20 +77,20 @@ unmodified; when it doesn't, the conflicts are confined to the files below.
 | `build.sh` | Host entry point — ensures data exists, then launches the Docker build |
 | `prepare-data.sh` | Downloads the freeware game assets and assembles `data/` |
 | `serve.sh` | Dev server with correct MIME types (`.wasm` → `application/wasm`) |
-| `docker/build-wasm.sh` | Runs inside the Emscripten container: builds all deps, then OpenOMF, copies artifacts |
+| `docker/build-wasm.sh` | Runs inside the Emscripten container: builds all deps, then OpenOMF, copies artifacts. Also applies a WASM-only patch to libconfuse: its `cfg_yylex_destroy` return-type mismatch (`void` decl vs `int` def in the flex lexer) is benign natively but makes `cfg_free()` trap on WASM |
 | `docker/run-build.sh` | Docker wrapper with volume mounts |
-| `shell/shell.html` | Custom HTML shell with loading screen, `ENV` setup, virtual filesystem dirs, and the touch controller |
+| `shell/shell.html` | Custom HTML shell with loading screen, `ENV` setup, virtual filesystem dirs, touch controller, IDBFS-persisted dropped mods |
 
-### What's not included
+Dependency tarballs go in `deps-src/`. Beyond the original set, the build needs
+three more for music-mod support:
 
-- **Netplay** — ENet uses raw UDP, which browsers can't do. Single-player works
-  fully; multiplayer would need a WebSocket relay bridge.
-- **Opus music** — disabled to reduce build complexity. The original MOD music
-  plays via libxmp.
-- **Screenshots** — libpng is linked but `glReadPixels` in WebGL2 may need
-  `preserveDrawingBuffer` for reliable screenshots.
+| Tarball | Source |
+|---|---|
+| `libogg-1.3.5.tar.gz` | https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz |
+| `opus-1.5.2.tar.gz` | https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz |
+| `opusfile-0.12.tar.gz` | https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz |
 
-## Touch controls
+### Touch controls
 
 The on-screen controller maps to the game's keyboard inputs:
 
@@ -101,6 +101,21 @@ The on-screen controller maps to the game's keyboard inputs:
 - **ESC** — Escape (pause / back)
 
 On desktop, the physical keyboard works as normal.
+
+## Mods
+
+The build bundles the official music remix mods (by Shady Monk and DeBisco)
+from the [OpenOMF soundtrack](https://github.com/omf2097/openomf-music-mod).
+Toggle between original MOD music and remixes in the in-game audio menu.
+
+You can also install your own mods: **drag any `.zip` mod file onto the page**
+and it's saved to IndexedDB and loaded on the next page reload. Mods can
+replace sprites, backgrounds, pilot portraits, animation data, and music —
+see the [OpenOMF mod
+docs](https://github.com/omf2097/openomf/releases/tag/0.8.6) for the format.
+
+Dropped mods persist across reloads (via IndexedDB). To remove a mod, clear
+the site's IndexedDB data in your browser settings.
 
 ## Audio notes
 
@@ -144,7 +159,9 @@ wasm-omf/
   Thompson, Hunter and contributors — MIT License.
 - *One Must Fall: 2097* by Diversions Entertainment (1994) — freeware.
 - Build dependencies: SDL2, SDL2_mixer, libxmp, libconfuse, enet, zlib, libpng,
-  libepoxy (shimmed).
+  libogg, libopus, opusfile, libepoxy (shimmed).
+- Music remixes by Shady Monk and DeBisco (bundled as mods from
+  [openomf-music-mod](https://github.com/omf2097/openomf-music-mod)).
 
 ## License
 
